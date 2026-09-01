@@ -113,3 +113,11 @@ def _require(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is not set")
     return value
+
+
+handlers = EcvaaHandlers(connect=lambda: db.connect(dsn))
+router = build_router(config, Handlers(
+    ecvn_rejection=handlers.ecvn_rejection,
+    ecvn_acceptance=handlers.ecvn_acceptance,
+    wman_exception=handlers.wman_exception,
+))

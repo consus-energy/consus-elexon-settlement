@@ -162,6 +162,10 @@ def _split(record: str, expected_type: str, expected: int, code: int) -> list[st
     return parts
 
 
+join_record = _join
+split_record = _split
+
+
 # --- build ------------------------------------------------------------------
 
 def _build_record(node: Node, spec: Record) -> list[str]:

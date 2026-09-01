@@ -218,4 +218,4 @@ class Router:
 def _now() -> dt.datetime:
     """GMT, naive. IDD 2.2.2: header times are GMT, and the field encoder
     formats naive datetimes."""
-    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    return dt.datetime.now(dt.timezone.utc)

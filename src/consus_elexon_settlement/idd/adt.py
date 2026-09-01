@@ -153,7 +153,7 @@ def acknowledge(
     """
     ack = Acknowledgement(
         received_time=received_time,
-        response_time=now or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None),
+        response_time=now or dt.datetime.now(dt.timezone.utc),
         filename=filename,
         response_code=OK if error is None else (error.response_code or SYNTAX_ERROR_BODY),
         response_data=None if error is None else str(error)[:80],
