@@ -20,7 +20,9 @@ from dataclasses import dataclass
 import psycopg
 from psycopg import Connection
 
-from . import states, adt
+from . import states
+from .idd import adt
+
 
 MAX_SEQUENCE = 999_999_999
 FILENAME_LENGTH = 14

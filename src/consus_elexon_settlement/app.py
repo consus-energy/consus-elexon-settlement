@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from .idd import spec, spec_cra, spec_saa, spec_svaa
 from .inbound import ecvaa
 from .inbound.router import Handler, Router
+from . import db
+from .inbound.handlers import EcvaaHandlers
 
 # IDD 2.2.2: the test data flag. 'OPER' or omitted means operational; any
 # other value is a test phase. Held here so the check is in one place.
@@ -115,9 +117,20 @@ def _require(name: str) -> str:
     return value
 
 
-handlers = EcvaaHandlers(connect=lambda: db.connect(dsn))
-router = build_router(config, Handlers(
-    ecvn_rejection=handlers.ecvn_rejection,
-    ecvn_acceptance=handlers.ecvn_acceptance,
-    wman_exception=handlers.wman_exception,
-))
+def build(config: Config, dsn: str) -> Router:
+    """Everything wired: handlers over a connection factory, router over the
+    handlers. The one call a process makes at startup.
+
+    `dsn` rather than a connection: handlers open one per file received. A
+    connection held open across a long-running poller is a connection that
+    will be dead when it matters.
+    """
+    handlers = EcvaaHandlers(connect=lambda: db.connect(dsn))
+    return build_router(
+        config,
+        Handlers(
+            ecvn_rejection=handlers.ecvn_rejection,
+            ecvn_acceptance=handlers.ecvn_acceptance,
+            wman_exception=handlers.wman_exception,
+        ),
+    )
