@@ -28,3 +28,13 @@ output "db_dsn_secret" {
   description = "Secret Manager secret holding the psycopg DSN."
   value       = google_secret_manager_secret.db_dsn.secret_id
 }
+
+output "image_repository" {
+  description = "Push the gateway image here"
+  value       = "${var.region}-docker.pkg.dev/${var.project_id}/${local.prefix}"
+}
+
+output "vpc_connector" {
+  description = "Serverless VPC connector. Jobs must use this or they leave from an ephemeral address Elexon has not whitelisted."
+  value       = google_vpc_access_connector.gateway.name
+}
