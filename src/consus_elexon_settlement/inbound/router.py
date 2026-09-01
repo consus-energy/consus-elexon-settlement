@@ -108,7 +108,7 @@ class Router:
         return None
 
     def addressed_to_us(self, header: Header) -> bool:
-        return self.identities.get(header.to_role) == header.to_participant
+        return self.identities.get(header.to_role_code) == header.to_participant_id
 
     def receive(
         self,
@@ -140,7 +140,7 @@ class Router:
             return self._reject(
                 header, filename, received_time,
                 FileError(
-                    f"addressed to {header.to_role}/{header.to_participant}, not us",
+                    f"addressed to {header.to_role_code}/{header.to_participant_id}, not us",
                     adt.UNEXPECTED_FILE_TYPE,
                 ),
                 reply_as=None,
@@ -176,7 +176,7 @@ class Router:
             header=header,
             response=adt.acknowledge(
                 header, filename, received_time,
-                header.to_role, header.to_participant,
+                header.to_role_code, header.to_participant_id,
             ),
             response_code=adt.OK,
             handler_error=handler_error,
@@ -198,7 +198,7 @@ class Router:
         and there is no correct identity to use.
         """
         if reply_as == ():
-            role, participant = header.to_role, header.to_participant
+            role, participant = header.to_role_code, header.to_participant_id
         elif reply_as is None:
             role, participant = next(iter(self.identities.items()))
         else:
