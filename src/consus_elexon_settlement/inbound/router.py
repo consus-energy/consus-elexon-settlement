@@ -19,8 +19,7 @@ storage was down.
 
 We hold two identities: 'VT' plus our Party Id for WMAN and the SVAA flows,
 'EN' plus our ECVNA Id for ECVNs. Inbound files are addressed to one or the
-other, and the reply must come from whichever was addressed. Replying as the
-wrong identity would be rejected, and would also consume nothing sensible.
+other, and the reply must come from whichever was addressed.
 """
 
 from __future__ import annotations
@@ -37,12 +36,17 @@ from ..idd.model import Flow, Spec
 class Handler(Protocol):
     """Handles one parsed inbound file.
 
+    Takes the filename as well as the parsed content: a handler that records
+    what arrived needs to correlate back to the inbound_file row, and the
+    filename is the only key it has. It cannot be derived from the header --
+    IDD 2.2.5 names are assigned by the sender, not computed.
+
     Returning normally means handled. Raising means the file was understood
-    but could not be actioned -- which is recorded, but does not change the
+    but could not be actioned, which is recorded but does not change the
     acknowledgement.
     """
 
-    def __call__(self, header: Header, body: list[Node]) -> None: ...
+    def __call__(self, header: Header, body: list[Node], filename: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -140,7 +144,8 @@ class Router:
             return self._reject(
                 header, filename, received_time,
                 FileError(
-                    f"addressed to {header.to_role_code}/{header.to_participant_id}, not us",
+                    f"addressed to {header.to_role_code}/{header.to_participant_id}, "
+                    f"not us",
                     adt.UNEXPECTED_FILE_TYPE,
                 ),
                 reply_as=None,
@@ -167,7 +172,7 @@ class Router:
         handler = self._handlers.get(header.file_type)
         if handler is not None:
             try:
-                handler(header, body)
+                handler(header, body, filename)
             except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
                 handler_error = exc
 
@@ -216,6 +221,7 @@ class Router:
 
 
 def _now() -> dt.datetime:
-    """GMT, naive. IDD 2.2.2: header times are GMT, and the field encoder
-    formats naive datetimes."""
+    """IDD 2.2.9: header times are GMT. fields.py requires an aware datetime
+    and converts to UTC itself, so hand it one rather than stripping tzinfo
+    and hoping the process runs in the right zone."""
     return dt.datetime.now(dt.timezone.utc)

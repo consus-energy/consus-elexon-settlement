@@ -1,7 +1,7 @@
 """Inbound handlers: feedback becomes state changes.
 
-Each handler matches the Handler protocol -- (header, body) in, nothing out --
-and is registered against a file type in app.build_router.
+Each handler matches the Handler protocol -- (header, body, filename) in,
+nothing out -- and is registered against a file type in app.build_router.
 
 The correlation problem is not symmetric, which shapes this module:
 
@@ -16,12 +16,14 @@ The correlation problem is not symmetric, which shapes this module:
                       BM Units. No file reference at all.
 
 That asymmetry means the business key must be unique, or a rejection could
-match more than one notification. Migration 0003 adds that constraint; until
-it is applied, _find_notification raises on ambiguity rather than guessing.
+match more than one notification. Migration 0003 adds that constraint;
+_find_notification still raises on ambiguity rather than guessing, because a
+rejection applied to the wrong notification marks a live position as failed
+while the failed one still looks healthy.
 
 Handlers raise on failure. The router records the exception on Received and
 carries on -- a handler failure is our problem and must not change the
-acknowledgement we send.
+acknowledgement we send, which is about whether the file parsed.
 """
 
 from __future__ import annotations
@@ -48,6 +50,10 @@ class EcvaaHandlers:
     Holds a connection factory rather than a connection: handlers run from a
     poller that may be long-lived, and a connection held open for hours is a
     connection that will be dead when it matters.
+
+    The filename is passed to every handler even where it is not yet used. It
+    is the only key back to the inbound_file row, and a handler that needs to
+    record why it failed will want it.
     """
 
     def __init__(self, connect) -> None:
@@ -55,12 +61,15 @@ class EcvaaHandlers:
 
     # --- E0281 acceptance ---------------------------------------------------
 
-    def ecvn_acceptance(self, header: Header, body: list[Node]) -> None:
+    def ecvn_acceptance(
+        self, header: Header, body: list[Node], filename: str
+    ) -> None:
         """The notification passed validation and is in effect.
 
-        Our filename comes back in the feedback, so the file is found
-        directly. The notification is then the one in that file -- EDN has
-        cardinality 1, so a file carries exactly one.
+        Our own filename comes back in the feedback (N0301), so the file is
+        found directly rather than by business key. The notification is then
+        the one in that file -- EDN has cardinality 1, so a file carries
+        exactly one.
         """
         acceptance = ecvaa.parse_acceptance(body)
 
@@ -68,14 +77,15 @@ class EcvaaHandlers:
             file_id = db.find_file_by_filename(conn, acceptance.our_filename)
             if file_id is None:
                 raise HandlerError(
-                    f"acceptance for {acceptance.our_filename}, which we have no record "
-                    f"of sending (reference {acceptance.reference_code})"
+                    f"{filename}: acceptance for {acceptance.our_filename}, which we "
+                    f"have no record of sending (reference {acceptance.reference_code})"
                 )
 
             notification_id = db.find_notification_in_file(conn, file_id)
             if notification_id is None:
                 raise HandlerError(
-                    f"file {acceptance.our_filename} has no notification recorded"
+                    f"{filename}: file {acceptance.our_filename} has no notification "
+                    f"recorded against it"
                 )
 
             db.accept_notification(conn, notification_id)
@@ -88,41 +98,47 @@ class EcvaaHandlers:
 
     # --- E0091 rejection ----------------------------------------------------
 
-    def ecvn_rejection(self, header: Header, body: list[Node]) -> None:
+    def ecvn_rejection(
+        self, header: Header, body: list[Node], filename: str
+    ) -> None:
         """The notification failed validation and is not in effect.
 
         No filename in this flow, so correlation is by business key. The
         reason is 80 characters of free text and is recorded verbatim: it is
-        the only explanation we get, and paraphrasing it into a category would
-        lose detail we may need when querying it.
+        the only explanation we get, and reducing it to a category would lose
+        detail needed when querying it with Elexon.
         """
         rejection = ecvaa.parse_rejection(body)
 
         with self._connect() as conn:
-            notification_id = _find_notification(conn, rejection)
+            notification_id = _find_notification(conn, rejection, filename)
             db.reject_notification(
                 conn,
                 notification_id,
                 reason=rejection.reason,
                 # E0091's CD2 names periods but carries no per-period reason:
-                # N0187 is on EDX only. Named periods therefore inherit the
+                # N0187 sits on EDX only. Named periods therefore inherit the
                 # notification reason rather than getting a specific one.
-                periods={p.settlement_period: rejection.reason for p in rejection.periods},
+                periods={
+                    p.settlement_period: rejection.reason for p in rejection.periods
+                },
             )
 
     # --- E0521 WMAN exception ----------------------------------------------
 
-    def wman_exception(self, header: Header, body: list[Node]) -> None:
+    def wman_exception(
+        self, header: Header, body: list[Node], filename: str
+    ) -> None:
         """A wholesale market activity notification was rejected.
 
-        Two levels of rejection and they mean different things. A period-level
-        reason with no named units rejects the whole period. Named units
-        reject only those. Treating either as total would be wrong in one
-        direction, so both paths are handled explicitly.
+        Two levels of rejection, and they mean different things. A
+        period-level reason with no named units rejects the whole period.
+        Named units reject only those. Treating either as total would be wrong
+        in one direction, so both paths are handled explicitly.
 
         This is the most urgent of the three: a rejected WMAN means SVAA does
-        not know we were active, so the deviation is not measured, whatever
-        the ECVN says.
+        not know we were active, so the deviation is not measured at all --
+        whatever the ECVN says.
         """
         exception = ecvaa.parse_wman_exception(body)
 
@@ -138,7 +154,7 @@ class EcvaaHandlers:
                     )
                     if not rejected:
                         raise HandlerError(
-                            f"WMAN rejection for {unit.bmu_id} on "
+                            f"{filename}: WMAN rejection for {unit.bmu_id} on "
                             f"{exception.settlement_date} period "
                             f"{exception.settlement_period}, which we have no record of"
                         )
@@ -152,12 +168,14 @@ class EcvaaHandlers:
             )
             if not rejected:
                 raise HandlerError(
-                    f"WMAN rejection for {exception.settlement_date} period "
-                    f"{exception.settlement_period}, which we have no record of"
+                    f"{filename}: WMAN rejection for {exception.settlement_date} "
+                    f"period {exception.settlement_period}, which we have no record of"
                 )
 
 
-def _find_notification(conn: Connection, rejection: ecvaa.EcvnRejection) -> int:
+def _find_notification(
+    conn: Connection, rejection: ecvaa.EcvnRejection, filename: str
+) -> int:
     """Locate the notification a rejection refers to, by business key.
 
     Raises rather than guessing when the key matches more than one row. A
@@ -174,13 +192,13 @@ def _find_notification(conn: Connection, rejection: ecvaa.EcvnRejection) -> int:
     )
     if not ids:
         raise HandlerError(
-            f"rejection for reference {rejection.reference_code} effective "
-            f"{rejection.effective_from}, which we have no record of sending"
+            f"{filename}: rejection for reference {rejection.reference_code} "
+            f"effective {rejection.effective_from}, which we have no record of sending"
         )
     if len(ids) > 1:
         raise HandlerError(
-            f"rejection for reference {rejection.reference_code} matches "
-            f"{len(ids)} notifications: {ids}. Reference codes must be unique "
-            f"per authorisation and effective date."
+            f"{filename}: rejection for reference {rejection.reference_code} matches "
+            f"{len(ids)} notifications: {ids}. Reference codes must be unique per "
+            f"authorisation and effective date."
         )
     return ids[0]

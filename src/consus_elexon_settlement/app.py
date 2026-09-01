@@ -12,8 +12,8 @@ the wrong place.
 
 The Gateway returned at the end holds the pieces and offers the two verbs a
 scheduler needs: collect what has arrived, send what is due. It does not
-decide when either happens -- that is the scheduler's job, and it depends on
-Gate Closure, which is a business concern rather than a wiring one.
+decide when either happens -- that depends on Gate Closure, which is a
+business concern rather than a wiring one.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from .archive import Archive
 from .idd import spec, spec_cra, spec_saa, spec_svaa
 from .inbound import ecvaa
 from .inbound.handlers import EcvaaHandlers
+from .inbound.reports import ReportHandler
 from .inbound.router import Handler, Received, Router
 from .outbound.sender import Sender
 from .outbound.transport import Transport
@@ -33,6 +34,21 @@ from .outbound.transport import Transport
 # IDD 2.2.1 field 10: the test data flag. 'OPER' or omitted means operational;
 # any other value is a test phase. Held here so the comparison is in one place.
 OPERATIONAL = "OPER"
+
+# Flows we receive and record but do not act on.
+#
+# Versions are listed explicitly rather than matched by prefix. Registering a
+# handler against a version Elexon does not send means the file arrives, is
+# acknowledged, and is silently never processed -- which looks identical to
+# working. Confirm the live versions before go-live.
+REPORT_FILE_TYPES = (
+    "E0131001", "E0131002",                 # Authorisation Report
+    "E0141003", "E0141004",                 # Notification Report
+    "E0221001",                             # Forward Contract Report
+    "P0285001", "P0285002",                 # Delivered Volume Exception
+    "P0288001", "P0288002", "P0288003",     # Secondary HH Consumption
+    "P0333001", "P0333002",                 # Baselining Expected Volume Report
+)
 
 
 @dataclass(frozen=True)
@@ -102,6 +118,7 @@ class Handlers:
     ecvn_rejection: Handler
     ecvn_acceptance: Handler
     wman_exception: Handler
+    report: Handler
 
 
 @dataclass(frozen=True)
@@ -166,6 +183,7 @@ def build(
                 ecvn_rejection=handlers.ecvn_rejection,
                 ecvn_acceptance=handlers.ecvn_acceptance,
                 wman_exception=handlers.wman_exception,
+                report=ReportHandler(connect=connect),
             ),
         ),
         sender=Sender(connect=connect, archive=archive, transport=transport),
@@ -174,7 +192,7 @@ def build(
 
 
 def build_router(config: Config, handlers: Handlers) -> Router:
-    """The inbound router, with every spec and the known handlers registered.
+    """The inbound router, with every spec and handler registered.
 
     All four central systems' specs are loaded regardless of which flows we
     currently handle. An unexpected file is then diagnosed as *unhandled*
@@ -193,11 +211,26 @@ def build_router(config: Config, handlers: Handlers) -> Router:
     router.register(ecvaa.ACCEPTANCE_FILE_TYPE, handlers.ecvn_acceptance)
     router.register(ecvaa.WMAN_EXCEPTION_FILE_TYPE, handlers.wman_exception)
 
+    # Reports are registered so an arriving report is recorded rather than
+    # counted as unhandled. The difference matters: unhandled means Elexon
+    # sent something we were not expecting, which is worth investigating.
+    #
+    # An unknown file type here raises at startup rather than being skipped.
+    # A typo that silently registers nothing would look identical to working
+    # until the report arrived and was ignored.
+    for file_type in REPORT_FILE_TYPES:
+        if router.flow(file_type) is None:
+            raise RuntimeError(
+                f"{file_type} is listed as a report but is not in any loaded spec"
+            )
+        router.register(file_type, handlers.report)
+
     return router
 
 
-def channel_for(conn, config: Config, identity: Identity, to_role: str,
-                to_participant: str) -> db.Channel:
+def channel_for(
+    conn, config: Config, identity: Identity, to_role: str, to_participant: str
+) -> db.Channel:
     """The channel for one of our identities to a central system.
 
     A convenience over db.get_channel that supplies the test flag from
@@ -220,19 +253,19 @@ def response_filename(received: str) -> str:
 
     IDD 2.2.5: filenames are 14 characters, unique across all central systems
     within a month, and the first two characters are the sender's role code.
-    A response is sent by us, so it carries our role code even though the rest
-    of the name derives from the file being answered.
 
     UNCONFIRMED. The IDD states the naming rule for files we originate; it is
     not stated whether a response derives its name from the file it answers or
-    takes a fresh name. This implementation keeps the received name and
-    replaces the role prefix, which is the reading that lets the recipient
-    correlate without opening the file. Confirm against the COMMS document
-    before go-live; it is on the open items list.
+    takes a fresh name. This returns the received name unchanged, which is the
+    reading that lets the recipient correlate without opening the file.
+    Confirm against the COMMS document before go-live -- it is on the open
+    items list.
     """
     if len(received) != 14:
-        raise ValueError(f"filename must be 14 characters, got {len(received)}: {received}")
-    return received  # placeholder: see docstring
+        raise ValueError(
+            f"filename must be 14 characters, got {len(received)}: {received}"
+        )
+    return received
 
 
 def _require(name: str) -> str:

@@ -202,3 +202,57 @@ def _single(body: list[Node], record_type: str) -> Node:
             f"expected a single {record_type} record, got {[n.record_type for n in body]}"
         )
     return body[0]
+
+
+
+# --- E0071 ECVNAA Feedback (confirmation) ----------------------------------
+#
+# Confirms a standing authorisation has been processed, and carries the
+# ECVNAA Key we must quote on every subsequent ECVN. Establishing the
+# authorisation is a manual process under BSCP71; this is the only automated
+# point at which the key reaches us.
+#
+# Three versions exist (E0071001/002/003) differing in optional records.
+# The EAD record carrying the key is present in all three, so the parser
+# reads that record rather than assuming a version.
+
+ECVNAA_FEEDBACK_FILE_TYPES = ("E0071001", "E0071002", "E0071003")
+EAD = "EAD"
+ECVNAA_KEY_FIELD = "N0297"
+EFFECTIVE_FROM_FIELD = "N0081"
+
+
+@dataclass(frozen=True)
+class EcvnaaConfirmation:
+    """An authorisation has been processed.
+
+    The key is optional in the flow: a confirmation of an amendment or
+    termination may carry none. A confirmation without a key is not an error,
+    but it is also not something to store as if it were one.
+    """
+
+    ecvnaa_id: str
+    ecvnaa_key: str | None = None
+    effective_from: dt.date | None = None
+
+    @property
+    def carries_key(self) -> bool:
+        return self.ecvnaa_key is not None
+
+
+def parse_ecvnaa_confirmation(body: list[Node]) -> EcvnaaConfirmation:
+    """Read the EAD record, wherever it sits in the file.
+
+    The surrounding records differ by version and carry counterparty details
+    we already hold. Searching for EAD rather than indexing by position means
+    the parser works across all three versions.
+    """
+    ead = next((n for n in body if n.record_type == EAD), None)
+    if ead is None:
+        raise ValueError(f"no {EAD} record; got {[n.record_type for n in body]}")
+
+    return EcvnaaConfirmation(
+        ecvnaa_id=ead.values[ECVNAA_ID],                      # type: ignore[arg-type]
+        ecvnaa_key=ead.values.get(ECVNAA_KEY_FIELD),          # type: ignore[arg-type]
+        effective_from=ead.values.get(EFFECTIVE_FROM_FIELD),  # type: ignore[arg-type]
+    )
