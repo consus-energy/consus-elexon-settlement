@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
+import psycopg
 
 from consus_elexon_settlement import db, states
 from consus_elexon_settlement.idd import adt
@@ -269,33 +270,30 @@ def test_find_file_by_filename(conn, channel):
 
 
 # --- WMAN -------------------------------------------------------------------
-
 def test_wman_rejection_at_period_and_unit_level(conn, channel):
     """E0521 rejects either the whole period or named units. Treating one as
     the other would be wrong in a direction that matters: a period-level
     rejection means SVAA does not know we were active at all."""
     file_id = built_file(conn, channel, file_type="E0511001")
     for bmu in ("2__ABCDE001", "2__ABCDE002"):
-        conn.execute(
-            """INSERT INTO wman (outbound_file_id, settlement_date,
-                                 settlement_period, bmu_id, active, state)
-                    VALUES (%s, %s, 37, %s, true, 'PENDING')""",
-            (file_id, dt.date(2026, 9, 1), bmu),
-        )
+        with conn.transaction():
+            conn.execute(
+                """INSERT INTO wman (outbound_file_id, settlement_date,
+                                     settlement_period, bmu_id, active, state)
+                        VALUES (%s, %s, 37, %s, true, 'PENDING')""",
+                (file_id, dt.date(2026, 9, 1), bmu),
+            )
     db.record_sent(conn, file_id)
     db.submit_items(conn, "wman", file_id)
 
-    affected = db.reject_wman(
-        conn, dt.date(2026, 9, 1), 37, "BM Unit not baselined", bmu_id="2__ABCDE001"
-    )
-    assert affected == 1
+    # One unit named: only that unit is rejected.
+    assert db.reject_wman(
+        conn, dt.date(2026, 9, 1), 37, "BM Unit not baselined",
+        bmu_id="2__ABCDE001",
+    ) == 1
 
-    remaining = db.reject_wman(
-        conn, dt.date(2026, 9, 1), 37, "period rejected"
-    )
-    assert remaining == 1
-
-
+    # No unit named: everything still submitted in the period goes.
+    assert db.reject_wman(conn, dt.date(2026, 9, 1), 37, "period rejected") == 1
 # --- helpers ----------------------------------------------------------------
 
 def _state(conn, entity_id: int, table: str = "outbound_file") -> str:
