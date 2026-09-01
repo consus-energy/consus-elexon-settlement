@@ -67,8 +67,8 @@ CREATE TABLE delivered_volume (
     settlement_date   date        NOT NULL,
     gsp_group_id      varchar(2)  NOT NULL,
     bmu_id            varchar(11) NOT NULL,
-    import_msid       bigint(13) NOT NULL,
-    export_msid       bigint(13),
+    import_msid       bigint      NOT NULL,
+    export_msid       bigint,
     state             text        NOT NULL,
     rejection_reason  varchar(80),
     created_at        timestamptz NOT NULL DEFAULT now()

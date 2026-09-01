@@ -389,20 +389,38 @@ def reject_wman(
 
 
 def submit_items(conn: Connection, table: str, outbound_file_id: int) -> None:
-    """Move every item in a file from PENDING to SUBMITTED.
+    """Move every item in a file from PENDING to SUBMITTED, periods included.
 
     Called once the file is sent. `table` is one of notification, sev, wman,
     delivered_volume -- they share the state vocabulary because they share the
     lifecycle.
+
+    The period rows must move with their parent. Leaving them PENDING means
+    the later cascade -- which matches on SUBMITTED -- finds nothing, and the
+    per-period state stays wrong permanently. Since E0091 rejects per period,
+    that is the state which records which half of a partial rejection is still
+    live, so it silently being wrong would be worse than it being absent.
     """
     if table not in _ITEM_TABLES:
         raise ValueError(f"not an item table: {table}")
+
     with conn.transaction():
         conn.execute(
             f"""UPDATE {table} SET state = %s
                  WHERE outbound_file_id = %s AND state = %s""",
             (states.SUBMITTED, outbound_file_id, states.PENDING),
         )
+
+        child = _ITEM_TABLES[table]
+        if child is not None:
+            child_table, foreign_key = child
+            conn.execute(
+                f"""UPDATE {child_table} SET state = %s
+                     WHERE {foreign_key} IN (
+                         SELECT id FROM {table} WHERE outbound_file_id = %s
+                     ) AND state = %s""",
+                (states.SUBMITTED, outbound_file_id, states.PENDING),
+            )
 
 
 # --- inbound ----------------------------------------------------------------
