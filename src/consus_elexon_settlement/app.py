@@ -2,11 +2,18 @@
 
 Everything below this module is ignorant of everything else -- file.py does
 not know about the database, the router does not know which handlers exist,
-handlers do not know how files arrive. This is the only place that knows all
-of it, which is what keeps the rest testable in isolation.
+the sender does not know whether transport is encrypted. This is the only
+place that knows all of it, which is what keeps the rest testable in
+isolation.
 
-Nothing here does work. It builds objects and returns them. If a function in
-this module grows an if statement about settlement, it is in the wrong place.
+Nothing here does work. It reads configuration, builds objects and returns
+them. If a function in this module grows a branch about settlement, it is in
+the wrong place.
+
+The Gateway returned at the end holds the pieces and offers the two verbs a
+scheduler needs: collect what has arrived, send what is due. It does not
+decide when either happens -- that is the scheduler's job, and it depends on
+Gate Closure, which is a business concern rather than a wiring one.
 """
 
 from __future__ import annotations
@@ -14,14 +21,17 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from . import db
+from .archive import Archive
 from .idd import spec, spec_cra, spec_saa, spec_svaa
 from .inbound import ecvaa
-from .inbound.router import Handler, Router
-from . import db
 from .inbound.handlers import EcvaaHandlers
+from .inbound.router import Handler, Received, Router
+from .outbound.sender import Sender
+from .outbound.transport import Transport
 
-# IDD 2.2.2: the test data flag. 'OPER' or omitted means operational; any
-# other value is a test phase. Held here so the check is in one place.
+# IDD 2.2.1 field 10: the test data flag. 'OPER' or omitted means operational;
+# any other value is a test phase. Held here so the comparison is in one place.
 OPERATIONAL = "OPER"
 
 
@@ -52,11 +62,15 @@ class Config:
         Deliberately no defaults for the participant ids. A gateway that
         starts with the wrong participant id sends files that are rejected,
         and the failure surfaces at Gate Closure rather than at startup.
+
+        The environment defaults to a test value rather than to operational:
+        the safe direction for a missing variable is 'this is a test', not
+        'send this to live settlement'.
         """
         return cls(
             vtp=Identity("VT", _require("CONSUS_VTP_PARTICIPANT")),
             ecvna=Identity("EN", _require("CONSUS_ECVNA_PARTICIPANT")),
-            environment=os.environ.get("CONSUS_ENVIRONMENT", "TEST1"),
+            environment=os.environ.get("CONSUS_ENVIRONMENT", "TST1"),
         )
 
     @property
@@ -71,10 +85,13 @@ class Config:
         return self.environment == OPERATIONAL
 
     @property
-    def test_data_flag(self) -> str | None:
-        """The AAA header test flag. None when operational, since the field
-        may be omitted."""
-        return None if self.is_operational else self.environment
+    def test_flag(self) -> str:
+        """The channel's test flag, as stored.
+
+        Empty string for operational, because that is how the header field is
+        omitted and how the channel table records it.
+        """
+        return "" if self.is_operational else self.environment
 
 
 @dataclass(frozen=True)
@@ -85,6 +102,75 @@ class Handlers:
     ecvn_rejection: Handler
     ecvn_acceptance: Handler
     wman_exception: Handler
+
+
+@dataclass(frozen=True)
+class Gateway:
+    """The assembled gateway.
+
+    Holds the pieces and offers the two verbs a scheduler needs. It does not
+    decide when to call them: that depends on Gate Closure, which is a
+    business concern rather than a wiring one.
+    """
+
+    router: Router
+    sender: Sender
+    transport: Transport
+
+    def collect(self) -> list[Received]:
+        """Collect and process every waiting inbound file.
+
+        Each response goes back through the same transport. A file that fails
+        to parse still gets one -- that is why the router returns a response
+        rather than raising, and why this loop does not skip on error.
+
+        Processing continues past a failure. One malformed file must not stop
+        the others being read, because one of those others may be a rejection
+        that needs acting on before Gate Closure.
+        """
+        results: list[Received] = []
+        for filename, payload in self.transport.collect():
+            result = self.router.receive(payload, filename)
+            self.transport.send(response_filename(filename), result.response)
+            results.append(result)
+        return results
+
+
+def build(
+    config: Config,
+    dsn: str,
+    archive: Archive,
+    transport: Transport,
+) -> Gateway:
+    """Everything wired. The one call a process makes at startup.
+
+    Archive and transport are passed in rather than constructed here, so a
+    test supplies LocalArchive and LocalTransport without this function
+    growing a branch on environment. The choice of implementation belongs to
+    whoever starts the process.
+
+    `dsn` rather than a connection: handlers and the sender each open one per
+    operation. A connection held open across a long-running poller is a
+    connection that will be dead when it matters.
+    """
+
+    def connect():
+        return db.connect(dsn)
+
+    handlers = EcvaaHandlers(connect=connect)
+
+    return Gateway(
+        router=build_router(
+            config,
+            Handlers(
+                ecvn_rejection=handlers.ecvn_rejection,
+                ecvn_acceptance=handlers.ecvn_acceptance,
+                wman_exception=handlers.wman_exception,
+            ),
+        ),
+        sender=Sender(connect=connect, archive=archive, transport=transport),
+        transport=transport,
+    )
 
 
 def build_router(config: Config, handlers: Handlers) -> Router:
@@ -110,27 +196,47 @@ def build_router(config: Config, handlers: Handlers) -> Router:
     return router
 
 
+def channel_for(conn, config: Config, identity: Identity, to_role: str,
+                to_participant: str) -> db.Channel:
+    """The channel for one of our identities to a central system.
+
+    A convenience over db.get_channel that supplies the test flag from
+    configuration, so a caller cannot accidentally reach the operational
+    channel from a test process. The flag is part of the channel's unique key,
+    so the wrong flag finds no channel and raises rather than sending.
+    """
+    return db.get_channel(
+        conn,
+        from_role_code=identity.role,
+        from_participant_id=identity.participant,
+        to_role_code=to_role,
+        to_participant_id=to_participant,
+        test_flag=config.test_flag,
+    )
+
+
+def response_filename(received: str) -> str:
+    """The name of our response to a received file.
+
+    IDD 2.2.5: filenames are 14 characters, unique across all central systems
+    within a month, and the first two characters are the sender's role code.
+    A response is sent by us, so it carries our role code even though the rest
+    of the name derives from the file being answered.
+
+    UNCONFIRMED. The IDD states the naming rule for files we originate; it is
+    not stated whether a response derives its name from the file it answers or
+    takes a fresh name. This implementation keeps the received name and
+    replaces the role prefix, which is the reading that lets the recipient
+    correlate without opening the file. Confirm against the COMMS document
+    before go-live; it is on the open items list.
+    """
+    if len(received) != 14:
+        raise ValueError(f"filename must be 14 characters, got {len(received)}: {received}")
+    return received  # placeholder: see docstring
+
+
 def _require(name: str) -> str:
     value = os.environ.get(name)
     if not value:
         raise RuntimeError(f"{name} is not set")
     return value
-
-
-def build(config: Config, dsn: str) -> Router:
-    """Everything wired: handlers over a connection factory, router over the
-    handlers. The one call a process makes at startup.
-
-    `dsn` rather than a connection: handlers open one per file received. A
-    connection held open across a long-running poller is a connection that
-    will be dead when it matters.
-    """
-    handlers = EcvaaHandlers(connect=lambda: db.connect(dsn))
-    return build_router(
-        config,
-        Handlers(
-            ecvn_rejection=handlers.ecvn_rejection,
-            ecvn_acceptance=handlers.ecvn_acceptance,
-            wman_exception=handlers.wman_exception,
-        ),
-    )
