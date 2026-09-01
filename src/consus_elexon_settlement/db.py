@@ -715,8 +715,18 @@ def confirm_ecvnaa(
 
 # --- internals --------------------------------------------------------------
 
-_ITEM_TABLES = frozenset({"notification", "sev", "wman", "delivered_volume"})
-
+# Item tables and their period children. The period rows share the item's
+# lifecycle: a notification is not submitted while its periods are still
+# pending, and rejection is recorded per period, so they move together.
+#
+# None means the table is flat. wman has one row per BM Unit and no period
+# children -- the settlement period is a column on the row itself.
+_ITEM_TABLES: dict[str, tuple[str, str] | None] = {
+    "notification": ("notification_period", "notification_id"),
+    "sev": ("sev_period", "sev_id"),
+    "delivered_volume": ("delivered_volume_period", "delivered_volume_id"),
+    "wman": None,
+}
 
 def _file_state(conn: Connection, file_id: int) -> str:
     row = conn.execute(
