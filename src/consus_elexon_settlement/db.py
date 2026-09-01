@@ -504,3 +504,233 @@ def reject_wman(
              bmu_id, states.SUBMITTED),
         )
     return cur.rowcount
+
+
+
+# --- inbound ----------------------------------------------------------------
+
+
+def record_inbound(
+    conn: Connection,
+    filename: str,
+    gcs_uri: str,
+    received_at: dt.datetime,
+) -> int:
+    """Record a received file before it is parsed.
+
+    Inserted first, updated after. Doing it in that order means a file that
+    crashes the parser still leaves evidence it arrived -- which is the case
+    where evidence matters most.
+
+    Returns the row id, or the existing one if the filename has been seen
+    before. A resend is not an error: ECVAA resends after a NACK, and the
+    second copy is the one that counts.
+    """
+    row = conn.execute(
+        """INSERT INTO inbound_file (filename, gcs_uri, received_at, parse_state)
+                VALUES (%s, %s, %s, 'PENDING')
+           ON CONFLICT (filename) DO UPDATE SET gcs_uri = EXCLUDED.gcs_uri
+             RETURNING id""",
+        (filename, gcs_uri, received_at),
+    ).fetchone()
+    return row[0]
+
+
+def record_parse_result(
+    conn: Connection,
+    filename: str,
+    file_type: str | None,
+    from_role_code: str | None,
+    to_role_code: str | None,
+    sequence_number: int | None,
+    parse_state: str,
+    parse_error: str | None,
+    response_code: int,
+) -> None:
+    """Store what the router made of the file.
+
+    parse_state is PARSED or PARSE_FAILED. The response code is recorded
+    either way, because it is what we told the sender and we may need to
+    justify it later.
+    """
+    conn.execute(
+        """UPDATE inbound_file
+              SET file_type = %s, from_role_code = %s, to_role_code = %s,
+                  sequence_number = %s, parse_state = %s, parse_error = %s,
+                  response_code = %s
+            WHERE filename = %s""",
+        (file_type, from_role_code, to_role_code, sequence_number,
+         parse_state, parse_error[:500] if parse_error else None,
+         response_code, filename),
+    )
+
+
+def record_handled(
+    conn: Connection, filename: str, error: str | None = None
+) -> None:
+    """The handler finished, successfully or not.
+
+    Separate from the parse result because they fail independently: a file can
+    parse cleanly and then fail to be actioned because our database was down.
+    Only the first of those is the sender's concern.
+    """
+    conn.execute(
+        """UPDATE inbound_file
+              SET handled_at = now(), handler_error = %s
+            WHERE filename = %s""",
+        (error[:500] if error else None, filename),
+    )
+
+
+def record_ack_sent(conn: Connection, filename: str) -> None:
+    conn.execute(
+        "UPDATE inbound_file SET ack_sent_at = now() WHERE filename = %s",
+        (filename,),
+    )
+
+
+def inbound_sequence_gaps(
+    conn: Connection, from_role_code: str, to_role_code: str
+) -> list[int]:
+    """Missing sequence numbers in files received on a channel.
+
+    ECVAA numbers its files to us contiguously, so a gap means a file was lost
+    in transit. SVAA tolerates gaps in its own numbering, so this is only
+    meaningful for ECVAA channels -- the caller decides which to check.
+    """
+    rows = conn.execute(
+        """SELECT sequence_number FROM inbound_file
+            WHERE from_role_code = %s AND to_role_code = %s
+              AND sequence_number IS NOT NULL
+            ORDER BY sequence_number""",
+        (from_role_code, to_role_code),
+    ).fetchall()
+    seen = [r[0] for r in rows]
+    if not seen:
+        return []
+    return [n for n in range(seen[0], seen[-1] + 1) if n not in set(seen)]
+
+
+# --- SVAA item state --------------------------------------------------------
+
+
+def find_outstanding_sev(conn: Connection, bmu_id: str) -> list[int]:
+    """Submitted expected volumes for a BM Unit awaiting feedback.
+
+    P0330 acceptance carries only the BM Unit id -- no filename, no dates, no
+    sequence number. So correlation depends on there being exactly one
+    outstanding submission for the unit. Returns a list so the caller can
+    treat ambiguity as an error rather than picking one.
+    """
+    rows = conn.execute(
+        """SELECT id FROM sev
+            WHERE bmu_id = %s AND state = %s
+            ORDER BY created_at""",
+        (bmu_id, states.SUBMITTED),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def accept_sev(conn: Connection, sev_id: int) -> None:
+    _move_item(conn, "sev", sev_id, states.ACCEPTED)
+    conn.execute(
+        """UPDATE sev_period SET state = %s
+            WHERE sev_id = %s AND state = %s""",
+        (states.ACCEPTED, sev_id, states.SUBMITTED),
+    )
+
+
+def reject_sev(
+    conn: Connection, sev_id: int, reason: str, settlement_period: int | None = None
+) -> None:
+    """Reject an expected volume, wholly or for one period.
+
+    P0329 makes every field optional except the reason, so a rejection may
+    name a period or not. Where it does not, the whole submission is rejected:
+    a rejection that names nothing cannot be assumed partial.
+    """
+    if settlement_period is None:
+        _move_item(conn, "sev", sev_id, states.REJECTED, reason)
+        conn.execute(
+            """UPDATE sev_period SET state = %s
+                WHERE sev_id = %s AND state = %s""",
+            (states.REJECTED, sev_id, states.SUBMITTED),
+        )
+    else:
+        conn.execute(
+            """UPDATE sev_period SET state = %s
+                WHERE sev_id = %s AND settlement_period = %s AND state = %s""",
+            (states.REJECTED, sev_id, settlement_period, states.SUBMITTED),
+        )
+
+
+def find_outstanding_delivered(
+    conn: Connection, settlement_date: dt.date, bmu_id: str | None = None
+) -> list[int]:
+    """Delivered volumes awaiting feedback for a settlement date."""
+    if bmu_id is None:
+        rows = conn.execute(
+            """SELECT id FROM delivered_volume
+                WHERE settlement_date = %s AND state = %s ORDER BY created_at""",
+            (settlement_date, states.SUBMITTED),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id FROM delivered_volume
+                WHERE settlement_date = %s AND bmu_id = %s AND state = %s
+                ORDER BY created_at""",
+            (settlement_date, bmu_id, states.SUBMITTED),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def accept_delivered(conn: Connection, delivered_id: int) -> None:
+    _move_item(conn, "delivered_volume", delivered_id, states.ACCEPTED)
+    conn.execute(
+        """UPDATE delivered_volume_period SET state = %s
+            WHERE delivered_volume_id = %s AND state = %s""",
+        (states.ACCEPTED, delivered_id, states.SUBMITTED),
+    )
+
+
+def reject_delivered(
+    conn: Connection, delivered_id: int, reason: str,
+    settlement_period: int | None = None,
+) -> None:
+    if settlement_period is None:
+        _move_item(conn, "delivered_volume", delivered_id, states.REJECTED, reason)
+        conn.execute(
+            """UPDATE delivered_volume_period SET state = %s
+                WHERE delivered_volume_id = %s AND state = %s""",
+            (states.REJECTED, delivered_id, states.SUBMITTED),
+        )
+    else:
+        conn.execute(
+            """UPDATE delivered_volume_period SET state = %s
+                WHERE delivered_volume_id = %s AND settlement_period = %s
+                  AND state = %s""",
+            (states.REJECTED, delivered_id, settlement_period, states.SUBMITTED),
+        )
+
+
+def confirm_ecvnaa(
+    conn: Connection,
+    ecvnaa_id: str,
+    key_secret_ref: str | None,
+    effective_from: dt.date | None,
+) -> None:
+    """Record that an authorisation is in force.
+
+    The key itself is never stored here -- only a reference to where it lives
+    in the secret store. It is a credential required on every ECVN, and a
+    credential in a settlement database is a credential in every backup of
+    that database.
+    """
+    conn.execute(
+        """UPDATE ecvnaa
+              SET confirmed_at = now(),
+                  key_secret_ref = COALESCE(%s, key_secret_ref),
+                  effective_from = COALESCE(%s, effective_from)
+            WHERE ecvnaa_id = %s""",
+        (key_secret_ref, effective_from, ecvnaa_id),
+    )

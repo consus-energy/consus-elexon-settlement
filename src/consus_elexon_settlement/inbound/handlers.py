@@ -33,6 +33,8 @@ from psycopg import Connection
 from .. import db
 from ..idd.file import Header, Node
 from . import ecvaa
+from .. import db, states
+from . import ecvaa, svaa
 
 
 class HandlerError(RuntimeError):
@@ -202,3 +204,152 @@ def _find_notification(
             f"authorisation and effective date."
         )
     return ids[0]
+
+
+
+class SvaaHandlers:
+    """SVAA feedback on expected volumes and delivered volumes.
+
+    Correlation here is weaker than on the ECVAA side. P0330 acceptance
+    carries only the BM Unit id, so it can only be matched to an outstanding
+    submission for that unit. Where more than one is outstanding, the handler
+    raises: accepting the wrong submission would leave a rejected one looking
+    live.
+    """
+
+    def __init__(self, connect) -> None:
+        self._connect = connect
+
+    def sev_acceptance(self, header: Header, body: list[Node], filename: str) -> None:
+        acceptances = svaa.parse_sev_acceptances(body)
+        with self._connect() as conn:
+            for acceptance in acceptances:
+                ids = db.find_outstanding_sev(conn, acceptance.bmu_id)
+                if not ids:
+                    raise HandlerError(
+                        f"{filename}: SEV acceptance for {acceptance.bmu_id}, which "
+                        f"has no outstanding submission"
+                    )
+                if len(ids) > 1:
+                    raise HandlerError(
+                        f"{filename}: SEV acceptance for {acceptance.bmu_id} matches "
+                        f"{len(ids)} outstanding submissions. P0330 carries only the "
+                        f"BM Unit id, so correlation needs exactly one."
+                    )
+                db.accept_sev(conn, ids[0])
+
+    def sev_rejection(self, header: Header, body: list[Node], filename: str) -> None:
+        rejections = svaa.parse_sev_rejections(body)
+        with self._connect() as conn:
+            for rejection in rejections:
+                if rejection.bmu_id is None:
+                    # Every field but the reason is optional in P0329. A
+                    # rejection naming no unit cannot be applied to a row, so
+                    # it is escalated rather than guessed at.
+                    raise HandlerError(
+                        f"{filename}: SEV rejection with no BM Unit id: "
+                        f"{rejection.reason}"
+                    )
+                ids = db.find_outstanding_sev(conn, rejection.bmu_id)
+                if not ids:
+                    raise HandlerError(
+                        f"{filename}: SEV rejection for {rejection.bmu_id}, which has "
+                        f"no outstanding submission: {rejection.reason}"
+                    )
+                db.reject_sev(
+                    conn, ids[0], rejection.reason, rejection.settlement_period
+                )
+
+    def sev_warning(self, header: Header, body: list[Node], filename: str) -> None:
+        """A Submitted pair has an expected volume of zero for a period.
+
+        Not a rejection: the submission stands and no state changes. But a
+        zero usually means a forecast produced nothing rather than genuinely
+        expecting nothing, so it is recorded for investigation before the
+        deviation is measured against it.
+        """
+        warnings = svaa.parse_sev_warnings(body)
+        with self._connect() as conn:
+            for warning in warnings:
+                conn.execute(
+                    """UPDATE sev SET rejection_reason = %s
+                        WHERE bmu_id = %s AND state = %s
+                          AND rejection_reason IS NULL""",
+                    (f"warning: zero expected volume on {warning.settlement_date}",
+                     warning.bmu_id, states.SUBMITTED),
+                )
+
+    def delivered_confirmation(
+        self, header: Header, body: list[Node], filename: str
+    ) -> None:
+        confirmation = svaa.parse_delivered_confirmation(body)
+        with self._connect() as conn:
+            ids = db.find_outstanding_delivered(
+                conn, confirmation.settlement_date, confirmation.bmu_id
+            )
+            if not ids:
+                raise HandlerError(
+                    f"{filename}: delivered volume confirmation for "
+                    f"{confirmation.settlement_date}, which has no outstanding "
+                    f"submission"
+                )
+            for delivered_id in ids:
+                db.accept_delivered(conn, delivered_id)
+
+    def delivered_rejection(
+        self, header: Header, body: list[Node], filename: str
+    ) -> None:
+        rejections = svaa.parse_delivered_rejections(body)
+        with self._connect() as conn:
+            for rejection in rejections:
+                if rejection.settlement_date is None:
+                    raise HandlerError(
+                        f"{filename}: delivered volume rejection with no settlement "
+                        f"date: {rejection.reason}"
+                    )
+                ids = db.find_outstanding_delivered(
+                    conn, rejection.settlement_date, rejection.bmu_id
+                )
+                if not ids:
+                    raise HandlerError(
+                        f"{filename}: delivered volume rejection for "
+                        f"{rejection.settlement_date}, which has no outstanding "
+                        f"submission: {rejection.reason}"
+                    )
+                db.reject_delivered(
+                    conn, ids[0], rejection.reason, rejection.settlement_period
+                )
+
+
+class EcvnaaHandler:
+    """E0071: an authorisation has been processed.
+
+    The most consequential handler in the system despite doing least. The
+    ECVNAA Key arrives here and nowhere else, and without it no ECVN can be
+    submitted at all. Establishing the authorisation is manual under BSCP71;
+    this is the only automated point at which the key reaches us.
+
+    The key is written to the secret store, not to the database. A credential
+    in a settlement database is a credential in every backup of it.
+    """
+
+    def __init__(self, connect, store_key) -> None:
+        self._connect = connect
+        self._store_key = store_key
+
+    def __call__(self, header: Header, body: list[Node], filename: str) -> None:
+        confirmation = ecvaa.parse_ecvnaa_confirmation(body)
+
+        secret_ref = None
+        if confirmation.carries_key:
+            secret_ref = self._store_key(
+                confirmation.ecvnaa_id, confirmation.ecvnaa_key
+            )
+
+        with self._connect() as conn:
+            db.confirm_ecvnaa(
+                conn,
+                ecvnaa_id=confirmation.ecvnaa_id,
+                key_secret_ref=secret_ref,
+                effective_from=confirmation.effective_from,
+            )
