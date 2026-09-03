@@ -789,3 +789,51 @@ def _expect_one(cur, entity_id: int, current: str, target: str) -> None:
         raise states.TransitionError(
             f"{entity_id}: state changed from under us during {current} -> {target}"
         )
+
+
+def ensure_channel(
+    conn: Connection,
+    from_role_code: str,
+    from_participant_id: str,
+    to_role_code: str,
+    to_participant_id: str,
+    test_flag: str,
+    allows_sequence_gaps: bool = False,
+) -> Channel:
+    """Create a channel if it does not exist, and return it either way.
+
+    Idempotent: seeding twice is a no-op rather than an error, so this can run
+    from a deployment step without a guard around it.
+
+    Deliberately does NOT update an existing channel. next_sequence is the one
+    piece of state that cannot be reconstructed -- resetting it would produce
+    duplicate sequence numbers, and ECVAA rejects a number it has already
+    processed. A channel that exists with different settings is a question for
+    a human, not something to overwrite.
+    """
+    conn.execute(
+        """INSERT INTO channel (from_role_code, from_participant_id,
+                                to_role_code, to_participant_id, test_flag,
+                                allows_sequence_gaps)
+                VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT (from_role_code, from_participant_id,
+                        to_role_code, to_participant_id, test_flag)
+             DO NOTHING""",
+        (from_role_code, from_participant_id, to_role_code, to_participant_id,
+         test_flag, allows_sequence_gaps),
+    )
+    return get_channel(
+        conn, from_role_code, from_participant_id,
+        to_role_code, to_participant_id, test_flag,
+    )
+
+
+def list_channels(conn: Connection) -> list[tuple]:
+    """Every channel, with its current sequence position."""
+    return conn.execute(
+        """SELECT id, from_role_code, from_participant_id,
+                  to_role_code, to_participant_id, test_flag,
+                  next_sequence, allows_sequence_gaps
+             FROM channel
+            ORDER BY from_role_code, to_role_code, test_flag"""
+    ).fetchall()

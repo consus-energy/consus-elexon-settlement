@@ -1,11 +1,12 @@
 """Entry points.
 
-Five commands, all thin. Each parses arguments, builds what it needs and calls
-one method. Nothing here decides anything: if a command grows a conditional
-about settlement, that logic belongs in a module and the command should call
-it.
+Seven commands, all thin. Each parses arguments, builds what it needs and
+calls one method. Nothing here decides anything: if a command grows a
+conditional about settlement, that logic belongs in a module and the command
+should call it.
 
     migrate     apply outstanding schema migrations
+    channel     create a channel, or list what exists
     collect     pull, parse, handle and acknowledge waiting files
     sweep       find outstanding submissions and alert on the pressing ones
     submit      build and send one file
@@ -13,13 +14,13 @@ it.
 
 collect and sweep are scheduled and idempotent, which makes them Cloud Run
 Jobs rather than endpoints on a service. submit is triggered by the EMS and is
-the only one that needs to be reachable. migrate is run on demand, from a
-deployment step or by hand.
+the only one that needs to be reachable. migrate and channel are run on
+demand, from a deployment step or by hand.
 
-migrate deliberately does NOT go through bootstrap(). It needs a database
-connection and nothing else -- no transport, no archive, no keys. A schema
-migration that could not run because the FTP details were missing would be an
-absurd dependency, and the first time it mattered would be an incident.
+migrate and channel deliberately do NOT go through bootstrap(). They need a
+database connection and nothing else -- no transport, no archive, no keys. A
+schema migration blocked by missing FTP configuration would be an absurd
+dependency, and the first time it mattered would be an incident.
 """
 
 from __future__ import annotations
@@ -191,7 +192,7 @@ def migrate(args: argparse.Namespace) -> int:
             ]
             if outstanding:
                 for m in outstanding:
-                    log.warning("outstanding: %04d_%s", m.version, m.name)
+                    log.warning("outstanding: %s", m.name)
                 return 1
             log.info("schema is up to date at version %s", before)
             return 0
@@ -203,12 +204,86 @@ def migrate(args: argparse.Namespace) -> int:
         return 0
 
     for m in applied:
-        log.info("applied %04d_%s", m.version, m.name)
+        log.info("applied %s", m.name)
     log.info(
         "%d migration(s) applied, now at version %s",
         len(applied),
         applied[-1].version,
     )
+    return 0
+
+
+def channel(args: argparse.Namespace) -> int:
+    """Create a channel, or list what exists.
+
+    A channel is the sequence counter for one sender identity talking to one
+    central system. Nothing can be built without one, because the sequence
+    number comes from it.
+
+    The test flag is NOT an argument. It comes from CONSUS_ENVIRONMENT, and
+    it is part of the channel's unique key, so a test process cannot create or
+    reach an operational channel. That is the structural control described in
+    ADR-0010: not a check that can be overridden, but an absence that stops
+    the header being buildable at all.
+
+    Role codes are required rather than defaulted. They are defined in IDD
+    Part 1 section 2.2.1 and getting one wrong means every file on that
+    channel is rejected -- so a wrong value should come from a human who was
+    asked, not from a default nobody questioned.
+    """
+    dsn = _require("CONSUS_SETTLEMENT_DSN")
+    config = app.Config.from_env()
+
+    with db.connect(dsn) as conn:
+        if args.list:
+            rows = db.list_channels(conn)
+            if not rows:
+                log.info("no channels. Nothing can be sent until one exists.")
+                return 0
+            for row in rows:
+                (channel_id, from_role, from_party, to_role, to_party,
+                 flag, next_seq, gaps) = row
+                log.info(
+                    "%3d  %s/%s -> %s/%s  flag=%-4s next=%d%s",
+                    channel_id, from_role, from_party, to_role, to_party,
+                    flag or "(oper)", next_seq,
+                    "  gaps allowed" if gaps else "",
+                )
+            return 0
+
+        if not (args.from_role and args.from_participant
+                and args.to_role and args.to_participant):
+            log.error(
+                "creating a channel needs --from-role, --from-participant, "
+                "--to-role and --to-participant"
+            )
+            return 2
+
+        created = db.ensure_channel(
+            conn,
+            from_role_code=args.from_role,
+            from_participant_id=args.from_participant,
+            to_role_code=args.to_role,
+            to_participant_id=args.to_participant,
+            test_flag=config.test_flag,
+            allows_sequence_gaps=args.allow_gaps,
+        )
+
+    log.info(
+        "channel %d: %s/%s -> %s/%s flag=%s next_sequence=%d",
+        created.id,
+        created.from_role_code, created.from_participant_id,
+        created.to_role_code, created.to_participant_id,
+        created.test_flag or "(operational)",
+        created.next_sequence,
+    )
+    if created.next_sequence > 1:
+        log.info(
+            "channel already existed and has sent %d file(s). Nothing was "
+            "changed: resetting a sequence would produce duplicates that "
+            "central systems reject.",
+            created.next_sequence - 1,
+        )
     return 0
 
 
@@ -348,6 +423,34 @@ def main(argv: list[str] | None = None) -> int:
         help="report outstanding migrations and exit non-zero, applying nothing",
     )
 
+    channel_parser = sub.add_parser(
+        "channel", help="create a channel, or list what exists"
+    )
+    channel_parser.add_argument(
+        "--list", action="store_true", help="list channels and their sequence position"
+    )
+    channel_parser.add_argument(
+        "--from-role",
+        help="our role code in the file header, IDD 2.2.1 field 5",
+    )
+    channel_parser.add_argument(
+        "--from-participant", help="our participant id for that role"
+    )
+    channel_parser.add_argument(
+        "--to-role", help="the central system's role code, IDD 2.2.1 field 7"
+    )
+    channel_parser.add_argument(
+        "--to-participant", help="the central system's participant id"
+    )
+    channel_parser.add_argument(
+        "--allow-gaps",
+        action="store_true",
+        help=(
+            "SVAA tolerates gaps in our sequence numbering; ECVAA does not. "
+            "Set this for SVAA channels only."
+        ),
+    )
+
     sub.add_parser("collect", help="pull, parse and acknowledge waiting files")
 
     sweep_parser = sub.add_parser("sweep", help="report outstanding submissions")
@@ -369,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
 
     commands = {
         "migrate": migrate,
+        "channel": channel,
         "collect": collect,
         "sweep": sweep,
         "submit": submit,
