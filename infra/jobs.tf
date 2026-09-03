@@ -96,6 +96,47 @@ resource "google_cloud_run_v2_job" "gateway" {
         egress    = "ALL_TRAFFIC"
       }
 
+      # Keys as mounted files rather than environment variables. A multi-line
+      # armoured key does not survive an environment variable cleanly, and
+      # environment variables are readable through /proc. One volume per
+      # secret: Cloud Run mounts a secret as a volume, not a directory of
+      # several.
+      volumes {
+        name = "gpg-key"
+        secret {
+          secret = google_secret_manager_secret.gpg_private_key.secret_id
+          items {
+            version = "latest"
+            path    = "private-key"
+            mode    = 256 # 0400 octal
+          }
+        }
+      }
+
+      volumes {
+        name = "gpg-passphrase"
+        secret {
+          secret = google_secret_manager_secret.gpg_passphrase.secret_id
+          items {
+            version = "latest"
+            path    = "passphrase"
+            mode    = 256
+          }
+        }
+      }
+
+      volumes {
+        name = "gpg-recipient"
+        secret {
+          secret = google_secret_manager_secret.gpg_recipient_key.secret_id
+          items {
+            version = "latest"
+            path    = "recipient-key"
+            mode    = 292 # 0444 octal, this one is public
+          }
+        }
+      }
+
       containers {
         image = local.image
         args  = each.value.args
@@ -116,6 +157,44 @@ resource "google_cloud_run_v2_job" "gateway" {
               version = "latest"
             }
           }
+        }
+
+        # Where the entrypoint looks for the mounted keys.
+        env {
+          name  = "CONSUS_GPG_PRIVATE_KEY_FILE"
+          value = "/secrets/gpg-key/private-key"
+        }
+
+        env {
+          name  = "CONSUS_GPG_PASSPHRASE_FILE"
+          value = "/secrets/gpg-passphrase/passphrase"
+        }
+
+        env {
+          name  = "CONSUS_GPG_RECIPIENT_KEY_FILE"
+          value = "/secrets/gpg-recipient/recipient-key"
+        }
+
+        # The key name gpg signs with. Our ECVNA id, because that is what the
+        # key was generated as and what Central Services hold for us.
+        env {
+          name  = "CONSUS_GPG_KEY"
+          value = var.ecvna_participant_id
+        }
+
+        volume_mounts {
+          name       = "gpg-key"
+          mount_path = "/secrets/gpg-key"
+        }
+
+        volume_mounts {
+          name       = "gpg-passphrase"
+          mount_path = "/secrets/gpg-passphrase"
+        }
+
+        volume_mounts {
+          name       = "gpg-recipient"
+          mount_path = "/secrets/gpg-recipient"
         }
 
         resources {

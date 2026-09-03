@@ -34,24 +34,27 @@ FROM python:3.12-slim
 # what is permitted further. Central Services' key was generated in 2008 and
 # cannot be changed, so the constraint is theirs and permanent.
 #
-# The version is therefore worth pinning rather than taking whatever the base
-# image ships: a silent gpg upgrade is a silent loss of the ability to talk to
+# The version is worth pinning rather than taking whatever the base image
+# ships: a silent gpg upgrade is a silent loss of the ability to talk to
 # Elexon, and it would surface at Gate Closure.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gnupg \
  && rm -rf /var/lib/apt/lists/* \
  && gpg --version | head -2
 
-# Non-root. Nothing here writes outside the keyring directory and the archive
-# bucket, and the latter is reached over the network.
+# Non-root. Nothing here writes outside the keyring directory; the archive and
+# database are reached over the network.
 RUN useradd --create-home --uid 1000 gateway
 
 WORKDIR /app
 COPY --from=build --chown=gateway:gateway /app /app
 
-# The keyring lives here, populated at startup from Secret Manager. Mode 700
-# because gpg refuses to use a home directory that others can read, and the
-# failure message when it does is not obvious.
+# The entrypoint imports keys from mounted secrets before running the command.
+COPY --chown=gateway:gateway docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+# The keyring lives here, populated at startup. Mode 700 because gpg refuses
+# to use a home directory that others can read.
 RUN mkdir -p /home/gateway/.gnupg \
  && chown gateway:gateway /home/gateway/.gnupg \
  && chmod 700 /home/gateway/.gnupg
@@ -65,4 +68,4 @@ USER gateway
 
 # No default command. Each Job supplies its own, so an image started by
 # accident does nothing rather than doing the wrong thing.
-ENTRYPOINT ["consus-settlement"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
