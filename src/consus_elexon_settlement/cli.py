@@ -1,10 +1,11 @@
 """Entry points.
 
-Four commands, all thin. Each parses arguments, builds the gateway and calls
+Five commands, all thin. Each parses arguments, builds what it needs and calls
 one method. Nothing here decides anything: if a command grows a conditional
 about settlement, that logic belongs in a module and the command should call
 it.
 
+    migrate     apply outstanding schema migrations
     collect     pull, parse, handle and acknowledge waiting files
     sweep       find outstanding submissions and alert on the pressing ones
     submit      build and send one file
@@ -12,7 +13,13 @@ it.
 
 collect and sweep are scheduled and idempotent, which makes them Cloud Run
 Jobs rather than endpoints on a service. submit is triggered by the EMS and is
-the only one that needs to be reachable.
+the only one that needs to be reachable. migrate is run on demand, from a
+deployment step or by hand.
+
+migrate deliberately does NOT go through bootstrap(). It needs a database
+connection and nothing else -- no transport, no archive, no keys. A schema
+migration that could not run because the FTP details were missing would be an
+absurd dependency, and the first time it mattered would be an incident.
 """
 
 from __future__ import annotations
@@ -25,7 +32,9 @@ import sys
 from pathlib import Path
 
 from . import app, db, deadlines, states
+from . import migrate as migrations
 from .archive import Archive, GcsArchive, LocalArchive
+from .outbound.gpg import GpgCipher
 from .outbound.transport import (
     Cipher,
     EncryptedTransport,
@@ -34,7 +43,6 @@ from .outbound.transport import (
     Transport,
     XSecCipher,
 )
-from .outbound.gpg import GpgCipher
 
 log = logging.getLogger("consus.settlement")
 
@@ -75,17 +83,10 @@ def _archive() -> Archive:
 
 
 def _transport() -> Transport:
-    """Transport, wrapped in encryption when XSec is configured.
+    """Transport, wrapped in encryption.
 
-    XSec is a Windows Service that watches directories rather than a library
-    we call, so it is configured by paths rather than credentials. The Linux
-    process writes into a folder a Windows node also sees; where that shared
-    storage lives is a deployment question, not one for this module.
-
-    When CONSUS_XSEC_ROOT is absent we run with NullCipher. That is correct
-    before the communications order completes, but it is logged as a warning:
-    'no encryption' should be a visible decision rather than an omission
-    nobody noticed.
+    The process writes into a folder; how that folder reaches Elexon is the
+    transport's problem, not this function's.
     """
     inner: Transport = LocalTransport(
         outbox=Path(_require("CONSUS_OUTBOX")),
@@ -93,38 +94,9 @@ def _transport() -> Transport:
     )
 
     cipher = _cipher()
-    log.info(
-        "transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__
-    )
+    log.info("transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__)
     return EncryptedTransport(inner=inner, cipher=cipher)
 
-
-def _cipher_xsec() -> Cipher:
-    root = os.environ.get("CONSUS_XSEC_ROOT")
-    if not root:
-        log.warning(
-            "CONSUS_XSEC_ROOT is not set: files will be sent UNENCRYPTED. "
-            "Correct before the BSC communications order completes; wrong "
-            "after it."
-        )
-        return NullCipher()
-
-    base = Path(root)
-    return XSecCipher(
-        encrypt_in=base / "ENCRYPT_IN",
-        encrypt_out=base / "ENCRYPT_OUT",
-        decrypt_in=base / "DECRYPT_IN",
-        decrypt_out=base / "DECRYPT_OUT",
-        error=base / "ERROR",
-        # Encryption sits between building a file and sending it, inside the
-        # window before Gate Closure. Thirty seconds is generous for a file of
-        # this size and still leaves time to fall back to manual submission.
-        timeout_seconds=float(os.environ.get("CONSUS_XSEC_TIMEOUT", "30")),
-        # Whether XSec preserves the filename in the output folder is not
-        # stated in the user guide. Off by default, which works either way;
-        # turn it on once the behaviour has been observed.
-        match_by_name=os.environ.get("CONSUS_XSEC_MATCH_BY_NAME") == "1",
-    )
 
 def _cipher() -> Cipher:
     """The cipher, chosen by what is configured.
@@ -144,7 +116,7 @@ def _cipher() -> Cipher:
             our_key=_require("CONSUS_GPG_KEY"),
             their_key=os.environ.get("CONSUS_GPG_RECIPIENT", "Central-Services-01"),
             home_dir=Path(gnupg_home),
-            passphrase=_require("CONSUS_GPG_PASSPHRASE"),
+            passphrase=_read_secret_file("CONSUS_GPG_PASSPHRASE_FILE"),
         )
 
     xsec_root = os.environ.get("CONSUS_XSEC_ROOT")
@@ -168,6 +140,19 @@ def _cipher() -> Cipher:
     return NullCipher()
 
 
+def _read_secret_file(name: str) -> str:
+    """Read a secret mounted as a file.
+
+    Cloud Run mounts secrets as files rather than environment variables, and
+    that is the right way round: a value in the environment is readable
+    through /proc by anything in the container.
+    """
+    path = os.environ.get(name)
+    if not path:
+        raise RuntimeError(f"{name} is not set")
+    return Path(path).read_text().strip()
+
+
 def _key_store():
     """Where an ECVNAA key is written when E0071 arrives.
 
@@ -179,6 +164,52 @@ def _key_store():
 
 
 # --- commands ---------------------------------------------------------------
+
+
+def migrate(args: argparse.Namespace) -> int:
+    """Apply outstanding schema migrations.
+
+    Takes only a DSN. Not routed through bootstrap() because a migration
+    should not be blocked by transport configuration it does not use.
+
+    Safe to run repeatedly: applied migrations are recorded with a checksum,
+    so a second run applies nothing and an edited migration fails loudly
+    rather than diverging between environments.
+    """
+    dsn = _require("CONSUS_SETTLEMENT_DSN")
+
+    with db.connect(dsn) as conn:
+        before = migrations.current_version(conn)
+
+        if args.check:
+            # Report and exit non-zero, applying nothing. For a deployment
+            # gate: a deploy that assumes the schema is current, when it is
+            # not, fails at the first query rather than at startup.
+            already = migrations.applied(conn)
+            outstanding = [
+                m for m in migrations.discover() if m.version not in already
+            ]
+            if outstanding:
+                for m in outstanding:
+                    log.warning("outstanding: %04d_%s", m.version, m.name)
+                return 1
+            log.info("schema is up to date at version %s", before)
+            return 0
+
+        applied = migrations.migrate(conn)
+
+    if not applied:
+        log.info("no migrations to apply, schema at version %s", before)
+        return 0
+
+    for m in applied:
+        log.info("applied %04d_%s", m.version, m.name)
+    log.info(
+        "%d migration(s) applied, now at version %s",
+        len(applied),
+        applied[-1].version,
+    )
+    return 0
 
 
 def collect(args: argparse.Namespace) -> int:
@@ -310,6 +341,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    migrate_parser = sub.add_parser("migrate", help="apply schema migrations")
+    migrate_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="report outstanding migrations and exit non-zero, applying nothing",
+    )
+
     sub.add_parser("collect", help="pull, parse and acknowledge waiting files")
 
     sweep_parser = sub.add_parser("sweep", help="report outstanding submissions")
@@ -330,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     commands = {
+        "migrate": migrate,
         "collect": collect,
         "sweep": sweep,
         "submit": submit,
