@@ -1,0 +1,3 @@
+AAA|X9999001|D|20071225045823|BP|<PARTY ID>|XX|UKDC|1|TR01|
+This is a test file from the participant to BSC Central Services
+ZZZ|3|123456789|
