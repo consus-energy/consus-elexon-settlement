@@ -128,3 +128,13 @@ variable "xsec_admins" {
   type        = list(string)
   default     = []
 }
+
+
+variable "connector_cidr" {
+  description = <<-EOT
+    Dedicated /28 for the Serverless VPC connector. Must not overlap
+    subnet_cidr: GCP requires the connector to own its range exclusively.
+  EOT
+  type    = string
+  default = "10.20.1.0/28"
+}

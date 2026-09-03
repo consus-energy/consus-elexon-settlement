@@ -1,0 +1,85 @@
+# Build pipeline for the settlement gateway.
+#
+# Tests gate the build. That is the point: a QRA answer says releases go
+# through an automated pipeline so that what is deployed matches what was
+# reviewed, and an image that can be pushed without passing the suite makes
+# that claim untrue.
+#
+# Integration tests run against a real Postgres started as a background step,
+# because the state machine cannot be tested any other way -- the concurrency
+# cases that matter are invisible to unit tests. Skipping them here would
+# leave the riskiest code ungated.
+#
+# Images are tagged with the commit SHA as well as the branch. 'latest' is
+# convenient for the test environment and unsuitable for operational: a Job
+# silently picking up a new image is a change nobody assessed (ADR-0010), so
+# the operational project pins a digest.
+
+substitutions:
+  _REGION: europe-west2
+  _REPO: settlement-test
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+
+  # Postgres for the integration tests. Started detached so the next step can
+  # begin while it comes up; the test step waits for readiness itself.
+  - id: postgres
+    name: gcr.io/cloud-builders/docker
+    args:
+      - run
+      - --detach
+      - --name=postgres
+      - --network=cloudbuild
+      - -e=POSTGRES_PASSWORD=build
+      - -e=POSTGRES_DB=settlement_test
+      - -e=POSTGRES_HOST_AUTH_METHOD=trust
+      - postgres:16-alpine
+
+  # The full suite, unit and integration. 173 tests at the time of writing.
+  # SETTLEMENT_TEST_DSN being set is what makes the integration tests run
+  # rather than skip, so its absence would quietly halve the coverage.
+  - id: test
+    name: python:3.12-slim
+    entrypoint: bash
+    env:
+      - SETTLEMENT_TEST_DSN=host=postgres port=5432 dbname=settlement_test user=postgres
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        pip install --quiet uv
+
+        # Wait for Postgres. A fixed sleep would either waste time or fail
+        # under load; polling does neither.
+        for i in $(seq 1 30); do
+          if python -c "import socket; socket.create_connection(('postgres', 5432), 2)" 2>/dev/null; then
+            break
+          fi
+          sleep 1
+        done
+
+        uv sync --frozen --all-extras
+        uv run pytest tests/ -q
+
+  # Build only if the tests passed. Cloud Build stops on the first failure, so
+  # this step is unreachable otherwise.
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    waitFor: [test]
+    args:
+      - build
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:$SHORT_SHA
+      - -t=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:latest
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:latest
+      - .
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:latest
+
+timeout: 1200s

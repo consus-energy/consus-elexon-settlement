@@ -36,11 +36,15 @@ resource "google_artifact_registry_repository" "images" {
 # infrastructure most likely to be forgotten and hardest to diagnose when it
 # is.
 resource "google_vpc_access_connector" "gateway" {
-  name          = substr("${local.prefix}-vpc", 0, 25)
-  region        = var.region
-  subnet {
-    name = google_compute_subnetwork.subnet.name
-  }
+  name   = "${local.prefix}-vpc"
+  region = var.region
+
+  # A dedicated /28, not the main subnet. GCP requires the connector to own
+  # its range exclusively -- pointing it at a shared subnet fails with
+  # "Subnets used for VPC connectors must have a netmask of 28".
+  ip_cidr_range = var.connector_cidr
+  network       = google_compute_network.vpc.name
+
   min_instances = 2
   max_instances = 3
 
@@ -143,10 +147,13 @@ resource "google_service_account" "scheduler" {
 }
 
 resource "google_cloud_run_v2_job_iam_member" "scheduler_invoke" {
-  for_each = google_cloud_run_v2_job.gateway
+  # Keys stated literally rather than derived from the jobs resource.
+  # for_each cannot iterate over something that does not exist yet, and
+  # Terraform needs the key set at plan time.
+  for_each = toset(["collect", "sweep"])
 
-  name     = each.value.name
-  location = each.value.location
+  name     = google_cloud_run_v2_job.gateway[each.key].name
+  location = google_cloud_run_v2_job.gateway[each.key].location
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.scheduler.email}"
 }

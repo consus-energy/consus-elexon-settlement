@@ -16,7 +16,7 @@ terraform {
   # separate from anything else that ever lands in the same bucket.
   backend "gcs" {
     bucket = "consus-tf-state-elexon-settlement"
-    prefix = "settlement"
+    prefix = "settlement/test"
   }
 }
 
