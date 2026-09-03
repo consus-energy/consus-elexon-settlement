@@ -92,3 +92,38 @@ variable "log_level" {
   type    = string
   default = "INFO"
 }
+
+
+
+variable "xsec_zone" {
+  description = "Zone for the XSec node. Must be within var.region."
+  type        = string
+  default     = "europe-west2-a"
+}
+
+variable "xsec_machine_type" {
+  description = <<-EOT
+    XSec does two things: encrypt files and move bytes. e2-small is adequate
+    and leaves headroom for the Windows desktop XSecManager needs.
+  EOT
+  type    = string
+  default = "e2-small"
+}
+
+variable "xsec_image" {
+  description = "Windows Server image. Desktop rather than Core: XSecManager is a GUI and key configuration is not a one-off."
+  type        = string
+  default     = "windows-cloud/windows-2022"
+}
+
+variable "xsec_deletion_protection" {
+  description = "The private key lives on this disk. Losing it means repeating the key exchange with Elexon."
+  type        = bool
+  default     = true
+}
+
+variable "xsec_admins" {
+  description = "Principals allowed to RDP via IAP, e.g. [\"user:ethan@consusenergy.com\"]"
+  type        = list(string)
+  default     = []
+}
