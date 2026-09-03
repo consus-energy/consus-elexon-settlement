@@ -103,11 +103,12 @@ variable "xsec_zone" {
 
 variable "xsec_machine_type" {
   description = <<-EOT
-    XSec does two things: encrypt files and move bytes. e2-small is adequate
-    and leaves headroom for the Windows desktop XSecManager needs.
+    Windows Server with Desktop Experience needs 4GB to be usable over RDP.
+    XSec itself is light -- encrypt a file, move bytes -- but XSecManager is
+    a GUI and the desktop is not optional if you want to configure keys.
   EOT
   type    = string
-  default = "e2-small"
+  default = "e2-medium"
 }
 
 variable "xsec_image" {
