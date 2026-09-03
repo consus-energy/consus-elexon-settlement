@@ -27,10 +27,12 @@ from pathlib import Path
 from . import app, db, deadlines, states
 from .archive import Archive, GcsArchive, LocalArchive
 from .outbound.transport import (
+    Cipher,
     EncryptedTransport,
     LocalTransport,
     NullCipher,
     Transport,
+    XSecCipher,
 )
 
 log = logging.getLogger("consus.settlement")
@@ -72,20 +74,56 @@ def _archive() -> Archive:
 
 
 def _transport() -> Transport:
-    """Transport, wrapped in encryption if a cipher is configured.
+    """Transport, wrapped in encryption when XSec is configured.
 
-    XSec is supplied by BSC CSA with the communications order and is not yet
-    installed, so NullCipher is the current implementation. It is explicit
-    rather than an absent wrapper: 'no encryption' should be a visible
-    decision in the logs, not an omission.
+    XSec is a Windows Service that watches directories rather than a library
+    we call, so it is configured by paths rather than credentials. The Linux
+    process writes into a folder a Windows node also sees; where that shared
+    storage lives is a deployment question, not one for this module.
+
+    When CONSUS_XSEC_ROOT is absent we run with NullCipher. That is correct
+    before the communications order completes, but it is logged as a warning:
+    'no encryption' should be a visible decision rather than an omission
+    nobody noticed.
     """
     inner: Transport = LocalTransport(
         outbox=Path(_require("CONSUS_OUTBOX")),
         inbox=Path(_require("CONSUS_INBOX")),
     )
-    cipher = NullCipher()
-    log.info("transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__)
+
+    cipher = _cipher()
+    log.info(
+        "transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__
+    )
     return EncryptedTransport(inner=inner, cipher=cipher)
+
+
+def _cipher() -> Cipher:
+    root = os.environ.get("CONSUS_XSEC_ROOT")
+    if not root:
+        log.warning(
+            "CONSUS_XSEC_ROOT is not set: files will be sent UNENCRYPTED. "
+            "Correct before the BSC communications order completes; wrong "
+            "after it."
+        )
+        return NullCipher()
+
+    base = Path(root)
+    return XSecCipher(
+        encrypt_in=base / "ENCRYPT_IN",
+        encrypt_out=base / "ENCRYPT_OUT",
+        decrypt_in=base / "DECRYPT_IN",
+        decrypt_out=base / "DECRYPT_OUT",
+        error=base / "ERROR",
+        # Encryption sits between building a file and sending it, inside the
+        # window before Gate Closure. Thirty seconds is generous for a file of
+        # this size and still leaves time to fall back to manual submission.
+        timeout_seconds=float(os.environ.get("CONSUS_XSEC_TIMEOUT", "30")),
+        # Whether XSec preserves the filename in the output folder is not
+        # stated in the user guide. Off by default, which works either way;
+        # turn it on once the behaviour has been observed.
+        match_by_name=os.environ.get("CONSUS_XSEC_MATCH_BY_NAME") == "1",
+    )
 
 
 def _key_store():
@@ -154,13 +192,13 @@ def sweep(args: argparse.Namespace) -> int:
             log.info("file %s outstanding in %s, no settlement period", file_id, state)
             continue
 
-        u = deadlines.urgency(settlement_date, settlement_period, now)
-        message = f"file {file_id} ({state}): {u}"
-        if u.level in ("CRITICAL", "MISSED"):
-            log.error("%s [%s]", message, u.level)
+        urgency = deadlines.urgency(settlement_date, settlement_period, now)
+        message = f"file {file_id} ({state}): {urgency}"
+        if urgency.level in ("CRITICAL", "MISSED"):
+            log.error("%s [%s]", message, urgency.level)
             critical.append(file_id)
-        elif u.level == "WARNING":
-            log.warning("%s [%s]", message, u.level)
+        elif urgency.level == "WARNING":
+            log.warning("%s [%s]", message, urgency.level)
         else:
             log.info("%s", message)
 
@@ -179,7 +217,7 @@ def submit(args: argparse.Namespace) -> int:
 
     Left unimplemented rather than guessed at: the interface from the EMS is
     not yet decided, and inventing one here would make it harder to adopt the
-    real one. See the Pub/Sub boundary in the design notes.
+    real one.
     """
     raise NotImplementedError(
         "submission is triggered by the EMS over Pub/Sub; that boundary is not "
@@ -191,8 +229,8 @@ def reconcile(args: argparse.Namespace) -> int:
     """Placeholder for daily reconciliation.
 
     Compares what we traded against what was accepted against what was
-    settled. Not built: the settlement side needs SAA report parsing, which
-    is currently handled generically.
+    settled. Not built: the settlement side needs SAA report parsing, which is
+    currently handled generically.
     """
     raise NotImplementedError("reconciliation is not yet built")
 

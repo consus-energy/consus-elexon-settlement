@@ -1,7 +1,7 @@
 """Outbound: domain object to bytes on the wire.
 
-The mirror of inbound.router. One method, four steps, in an order that is not
-negotiable:
+The mirror of inbound.receiver. One method, four steps, in an order that is
+not negotiable:
 
     1. reserve  -- allocate the sequence number and insert the file row
     2. build    -- render the bytes, compute the checksum
@@ -13,32 +13,28 @@ discipline: BUILD ONCE, SEND MANY. A retry re-sends the archived bytes under
 the original sequence number. Regenerating would allocate a second number and
 leave a permanent gap at the first, and ECVAA stops processing at a gap
 (IDD 2.2.8). A gap cannot be corrected retrospectively -- it is fixed by
-agreement with Elexon, not by code.
+agreement with Elexon, not by code. See ADR-0002.
 
 Two identities. WMAN and the SVAA flows go out as the VTP ('VT' plus our Party
 Id); ECVNs go out as the ECVN Agent ('EN' plus our ECVNA Id), because only an
 ECVNA may submit one. Separate channels, separate counters. The caller picks
 the identity by passing the right channel; nothing here infers it, because an
-inference that is wrong corrupts both sequences silently.
+inference that is wrong corrupts both sequences silently. See ADR-0004.
 
-Transport is a protocol, not a dependency. Today it is a pass-through; when
-XSec and FTP arrive they slot in behind the same interface without touching
-the sequence logic.
+Transport is a protocol, not a dependency. Encryption sits behind the same
+interface, so whether XSec is in the path is invisible from here.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from typing import Protocol
 
-from psycopg import Connection
-
-from . import transport as transport_module
 from .. import db, states
 from ..archive import Archive, object_key
 from ..idd.file import Header, Node, build
 from ..idd.model import Flow
+from .transport import Transport
 
 
 class SendError(RuntimeError):
@@ -70,7 +66,7 @@ class Sender:
         self,
         connect,
         archive: Archive,
-        transport: transport_module.Transport,
+        transport: Transport,
     ) -> None:
         self._connect = connect
         self._archive = archive
@@ -94,6 +90,8 @@ class Sender:
         """
         creation_time = creation_time or _now()
         if creation_time.tzinfo is None:
+            # fields.py rejects naive datetimes for the same reason: a naive
+            # value is an assumption waiting to be wrong on a clock-change day.
             raise SendError("creation_time must be timezone-aware")
 
         with self._connect() as conn:
@@ -118,7 +116,7 @@ class Sender:
                 # The test flag is a property of the channel, not a parameter.
                 # An operational file cannot be built on a test channel, which
                 # is the structural guarantee rather than a config check
-                # somebody can forget.
+                # somebody can forget. See ADR-0010.
                 test_flag=channel.test_flag or None,
             )
 
@@ -131,14 +129,16 @@ class Sender:
                 conn,
                 file_id=reserved.id,
                 checksum=_checksum_of(payload),
-                record_count=payload.count(b"\n"),
+                record_count=_record_count_of(payload),
                 gcs_uri=uri,
             )
 
         # Sending happens outside the reserve/build transaction. If transport
-        # hangs, the file is already archived and recoverable; holding the
-        # transaction open across a network call would block the sequence
-        # counter for every other file on the channel.
+        # hangs -- and with XSec in the path it can, since encryption is an
+        # asynchronous file handover -- the file is already archived and
+        # recoverable. Holding the transaction open across a network call
+        # would block the sequence counter for every other file on the
+        # channel.
         return self._deliver(reserved.id, reserved.filename,
                              reserved.sequence_number, payload, uri)
 
@@ -184,14 +184,35 @@ class Sender:
         return Sent(file_id, filename, sequence_number, payload, uri, delivered=True)
 
 
-def _checksum_of(payload: bytes) -> int:
-    """The checksum already in the footer.
+def _footer_fields(payload: bytes) -> list[str]:
+    """The ZZZ trailer, split into fields.
 
-    Read back rather than recomputed: the footer is what the recipient will
-    verify, so recording anything else would record a number nobody checks.
+    Read back from the rendered bytes rather than recomputed. What the footer
+    says is what the recipient will verify, so recording anything else would
+    record a number nobody checks.
+
+    Tolerant of the record delimiter: rstrip removes a trailing newline in
+    either LF or CRLF form, and rsplit finds the last line regardless. The
+    IDD gives LF (2.2.4), but the sample file supplied by Elexon uses CRLF,
+    and that question is not yet settled -- so nothing here depends on it.
     """
-    footer = payload.rstrip(b"\n").rsplit(b"\n", 1)[-1].decode("ascii")
-    return int(footer.split("|")[2])
+    last_line = payload.rstrip(b"\r\n").rsplit(b"\n", 1)[-1]
+    return last_line.decode("ascii").rstrip("\r").split("|")
+
+
+def _checksum_of(payload: bytes) -> int:
+    return int(_footer_fields(payload)[2])
+
+
+def _record_count_of(payload: bytes) -> int:
+    """The record count from the footer, including header and trailer.
+
+    Previously counted newlines in the payload, which assumed both a trailing
+    delimiter and an LF-only file. Reading the footer removes both
+    assumptions, and records the number we actually declared rather than a
+    second opinion about it.
+    """
+    return int(_footer_fields(payload)[1])
 
 
 def _now() -> dt.datetime:
