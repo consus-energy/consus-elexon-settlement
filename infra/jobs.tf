@@ -4,7 +4,7 @@
 # idempotent. A service would mean holding an HTTP process alive to do work on
 # a timer, which is the wrong shape and costs more.
 #
-# Both run inside the VPC so they leave through the reserved egress address.
+# All run inside the VPC so they leave through the reserved egress address.
 # Elexon whitelists that address, so a Job that bypassed the VPC would be
 # refused at the far end -- and would look like a transport fault rather than
 # a configuration one.
@@ -64,10 +64,25 @@ locals {
     { name = "CONSUS_ARCHIVE_BUCKET", value = google_storage_bucket.archive.name },
     { name = "CONSUS_LOG_LEVEL", value = var.log_level },
   ]
+
+  # Jobs that run on a schedule. migrate is excluded deliberately: a schema
+  # change is a deliberate act, and a migration applying itself on a timer
+  # would land at an unpredictable moment relative to a deployment.
+  scheduled_jobs = {
+    collect = "*/5 * * * *"
+    sweep   = "*/15 * * * *"
+  }
 }
 
 resource "google_cloud_run_v2_job" "gateway" {
   for_each = {
+    # Run on demand, from a deployment step or by hand. Safe to repeat:
+    # applied migrations are recorded with a checksum, so a second run applies
+    # nothing and an edited migration fails loudly.
+    migrate = {
+      args    = ["migrate"]
+      timeout = "600s"
+    }
     collect = {
       args    = ["collect"]
       timeout = "600s"
@@ -88,7 +103,8 @@ resource "google_cloud_run_v2_job" "gateway" {
 
       # One attempt. A retry that re-runs collect would re-acknowledge files
       # already acknowledged; a retry of sweep would re-alert. Both are
-      # scheduled frequently enough that the next run is the retry.
+      # scheduled frequently enough that the next run is the retry, and
+      # migrate is deliberate rather than automatic.
       max_retries = 0
 
       vpc_access {
@@ -101,6 +117,10 @@ resource "google_cloud_run_v2_job" "gateway" {
       # environment variables are readable through /proc. One volume per
       # secret: Cloud Run mounts a secret as a volume, not a directory of
       # several.
+      #
+      # migrate does not need these, but shares them rather than duplicating
+      # the whole resource for one Job. The service account is the same
+      # either way, so mounting them grants nothing it did not already have.
       volumes {
         name = "gpg-key"
         secret {
@@ -207,7 +227,13 @@ resource "google_cloud_run_v2_job" "gateway" {
     }
   }
 
-  depends_on = [google_project_service.run_apis]
+  depends_on = [
+    google_project_service.run_apis,
+    # IAM must be in place before Cloud Run validates the secret mounts, and
+    # Terraform cannot infer that from the secret_id reference alone: it sees
+    # a string, not a grant.
+    google_secret_manager_secret_iam_member.gateway_gpg,
+  ]
 }
 
 # --- schedules --------------------------------------------------------------
@@ -219,6 +245,8 @@ resource "google_cloud_run_v2_job" "gateway" {
 # sweep runs every fifteen. Its job is to notice silence, and the urgency
 # judgement is per settlement period rather than per run, so a coarser
 # interval loses nothing.
+#
+# migrate has no schedule. It is invoked deliberately.
 
 resource "google_service_account" "scheduler" {
   account_id   = "${local.prefix}-sched"
@@ -226,10 +254,10 @@ resource "google_service_account" "scheduler" {
 }
 
 resource "google_cloud_run_v2_job_iam_member" "scheduler_invoke" {
-  # Keys stated literally rather than derived from the jobs resource.
-  # for_each cannot iterate over something that does not exist yet, and
-  # Terraform needs the key set at plan time.
-  for_each = toset(["collect", "sweep"])
+  # Only the scheduled jobs. The scheduler has no reason to be able to run a
+  # migration, and granting it would mean a misconfigured schedule could apply
+  # one unattended.
+  for_each = local.scheduled_jobs
 
   name     = google_cloud_run_v2_job.gateway[each.key].name
   location = google_cloud_run_v2_job.gateway[each.key].location
@@ -238,10 +266,7 @@ resource "google_cloud_run_v2_job_iam_member" "scheduler_invoke" {
 }
 
 resource "google_cloud_scheduler_job" "gateway" {
-  for_each = {
-    collect = "*/5 * * * *"
-    sweep   = "*/15 * * * *"
-  }
+  for_each = local.scheduled_jobs
 
   name     = "${local.prefix}-${each.key}"
   region   = var.region
