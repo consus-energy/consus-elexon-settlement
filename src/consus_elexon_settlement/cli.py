@@ -100,7 +100,7 @@ def _transport() -> Transport:
             host=host,
             port=int(os.environ.get("CONSUS_FTP_PORT", "21")),
             username=_require("CONSUS_FTP_USER"),
-            password=_read_secret_file("CONSUS_FTP_PASSWORD_FILE"),
+            password=read_secret_file("CONSUS_FTP_PASSWORD_FILE"),
             outbound_dir=_require("CONSUS_FTP_OUTBOUND_DIR"),
             inbound_dir=_require("CONSUS_FTP_INBOUND_DIR"),
             # Defaults to TLS. Whether Elexon use FTPS or plain FTP is an
@@ -119,7 +119,7 @@ def _transport() -> Transport:
             inbox=Path(_require("CONSUS_INBOX")),
         )
 
-    cipher = _cipher()
+    cipher = cipher()
     log.info("transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__)
     return EncryptedTransport(inner=inner, cipher=cipher)
 

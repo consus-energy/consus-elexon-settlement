@@ -45,7 +45,6 @@ from .. import app as gateway_app
 from .. import db, service
 from ..archive import GcsArchive
 from ..app import build_cipher, read_secret_file, require_env as _require
-from ..app import require_env as _require
 
 from . import messages
 from ..outbound.ftp import FtpTransport
