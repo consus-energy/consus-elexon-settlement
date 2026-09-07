@@ -293,8 +293,8 @@ class IntentService:
         # carries no filename and this is the only way back to the row.
         # Revision is included so a revised position gets its own code.
         reference = (
-            f"R{intent.settlement_date:%y%m%d}"
-            f"{intent.settlement_period:02d}{intent.revision:d}"
+            f"{intent.settlement_date:%y%m%d}"
+            f"{intent.settlement_period:02d}{intent.revision:02d}"
         )
         return self._submitter.ecvn(
             self._channels.agent_to_ecvaa,
