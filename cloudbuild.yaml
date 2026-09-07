@@ -1,4 +1,4 @@
-# Build pipeline for the settlement gateway.
+# Build and deploy pipeline for the settlement gateway.
 #
 # Tests gate the build. That is the point: a QRA answer says releases go
 # through an automated pipeline so that what is deployed matches what was
@@ -10,14 +10,28 @@
 # cases that matter are invisible to unit tests. Skipping them here would
 # leave the riskiest code ungated.
 #
-# Images are tagged with the commit SHA as well as the branch. 'latest' is
-# convenient for the test environment and unsuitable for operational: a Job
-# silently picking up a new image is a change nobody assessed (ADR-0010), so
-# the operational project pins a digest.
+# ORDER MATTERS AT THE END. Schema before code:
+#
+#     push -> update migrate job -> run migrations -> update collect and sweep
+#
+# The migrate job is updated and run first so that when collect and sweep pick
+# up the new image, the columns they expect already exist. Doing it the other
+# way round leaves a window where new code queries an old schema, and the
+# failure surfaces as a null constraint violation at Gate Closure rather than
+# in a build log.
+#
+# If migrations fail, collect and sweep are NOT updated. They carry on running
+# the previous image against the previous schema, which is a working system
+# rather than a broken one.
+#
+# This pipeline deploys to TEST only -- _REPO is settlement-test. Operational
+# deployment is a deliberate terraform apply with a pinned digest: a Job
+# silently picking up a new image is a change nobody assessed (ADR-0010).
 
 substitutions:
   _REGION: europe-west2
   _REPO: settlement-test
+  _JOB_PREFIX: settlement-test
 
 options:
   machineType: E2_HIGHCPU_8
@@ -39,9 +53,9 @@ steps:
       - -e=POSTGRES_HOST_AUTH_METHOD=trust
       - postgres:16-alpine
 
-  # The full suite, unit and integration. 173 tests at the time of writing.
-  # SETTLEMENT_TEST_DSN being set is what makes the integration tests run
-  # rather than skip, so its absence would quietly halve the coverage.
+  # The full suite, unit and integration. SETTLEMENT_TEST_DSN being set is what
+  # makes the integration tests run rather than skip, so its absence would
+  # quietly halve the coverage.
   - id: test
     name: python:3.12-slim
     entrypoint: bash
@@ -51,6 +65,10 @@ steps:
       - -c
       - |
         set -euo pipefail
+
+        # gnupg for the encryption tests. Without it they skip, and the
+        # encryption path is the one that cannot be checked any other way.
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends gnupg
 
         pip install --quiet uv
 
@@ -78,8 +96,61 @@ steps:
       - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:latest
       - .
 
+  # Pushed explicitly rather than relying on the images block, which runs
+  # after every step. The deploy steps below need the image to exist.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build]
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway
+
+  # Schema first. The migrate job is updated to the new image, then run, so
+  # the migrations that ship with this commit are the ones applied.
+  #
+  # Tagged with the commit SHA rather than latest: a job pinned to a digest
+  # runs what was tested, and 'latest' would leave the deployed version
+  # ambiguous in the console.
+  - id: migrate
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    waitFor: [push]
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        gcloud run jobs update ${_JOB_PREFIX}-migrate \
+          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:$SHORT_SHA \
+          --region=${_REGION} \
+          --quiet
+
+        # --wait so a failing migration fails the build. Without it the
+        # deploy step would proceed against a schema that did not apply.
+        gcloud run jobs execute ${_JOB_PREFIX}-migrate \
+          --region=${_REGION} --wait
+
+  # Then the code. Only reached if the migrations applied, so collect and
+  # sweep never run against a schema they do not expect.
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    waitFor: [migrate]
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        for job in collect sweep; do
+          gcloud run jobs update ${_JOB_PREFIX}-$job \
+            --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:$SHORT_SHA \
+            --region=${_REGION} \
+            --quiet
+        done
+
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:$SHORT_SHA
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/gateway:latest
 
-timeout: 1200s
+timeout: 1800s

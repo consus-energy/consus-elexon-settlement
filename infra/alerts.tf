@@ -172,6 +172,7 @@ resource "google_monitoring_alert_policy" "gate_closure" {
 resource "google_monitoring_alert_policy" "collect_not_running" {
   display_name = "${local.prefix}: collect has stopped running"
   combiner     = "OR"
+  enabled      = var.absence_alerts_enabled
 
   documentation {
     content = <<-EOT
@@ -223,6 +224,7 @@ resource "google_monitoring_alert_policy" "collect_not_running" {
 resource "google_monitoring_alert_policy" "sweep_not_running" {
   display_name = "${local.prefix}: sweep has stopped running"
   combiner     = "OR"
+  enabled      = var.absence_alerts_enabled
 
   documentation {
     content = <<-EOT

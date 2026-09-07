@@ -328,3 +328,5 @@ Set up the XSec node, once, over RDP:
 That last one is the structural control in ADR-0010. A test project has no
 operational channel row, so it cannot build an operational header, so it
 cannot send one. It is not a configuration check that can be overridden.
+
+- absence_alerts_enabled = true, with the schedulers resumed

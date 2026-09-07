@@ -120,3 +120,14 @@ variable "alert_emails" {
     error_message = "At least one alert recipient is required. An unmonitored gateway is worse than no gateway: it looks like it is working."
   }
 }
+
+variable "absence_alerts_enabled" {
+  description = <<-EOT
+    The two "stopped running" policies. Turn off while the schedulers are
+    paused: the policies are correct -- the jobs genuinely are not running --
+    but an alert firing hourly for a known state is how people learn to ignore
+    alerts. Turn back on when the schedulers resume.
+  EOT
+  type    = bool
+  default = true
+}
