@@ -167,8 +167,11 @@ def test_delivered_groups_pairs_by_gsp_and_unit():
     """The file nests GSP group -> BM Unit -> MSID pair; storage is flat.
 
     Two pairs in the same group and unit must produce one MSB and one MSC with
-    two MSI children, not two of each. Getting this wrong produces a file that
+    two MSJ children, not two of each. Getting this wrong produces a file that
     parses but misrepresents the portfolio.
+
+    MSJ, not MSI: v002 renamed the record (P375), and the rename is why the
+    version matters -- an MSI record in a v002 file is unrecognised.
     """
     original = delivered.Delivered(
         DATE,
@@ -182,8 +185,7 @@ def test_delivered_groups_pairs_by_gsp_and_unit():
     assert len(msa.of_type("MSB")) == 1
     msb = msa.of_type("MSB")[0]
     assert len(msb.of_type("MSC")) == 1
-    assert len(msb.of_type("MSC")[0].of_type("MSI")) == 2
-
+    assert len(msb.of_type("MSC")[0].of_type("MSJ")) == 2
 
 def test_delivered_export_msid_optional():
     # MSI has Export MSID optional, which is how a pair with no export meter
@@ -192,3 +194,9 @@ def test_delivered_export_msid_optional():
         1234567890123, (delivered.DeliveredPeriod(1, Decimal("0")),), "_A", BMU
     )
     assert pair.export_msid is None
+
+def test_delivered_uses_version_002():
+    """The SVA Data Catalogue gives 002 for the VTP route, and BSCP602
+    footnote 14 says P375 introduced it. v001 is a different file: MSI rather
+    than MSJ, and no AMSID branch."""
+    assert delivered.FILE_TYPE == "P0282002"
