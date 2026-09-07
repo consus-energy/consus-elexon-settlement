@@ -21,6 +21,17 @@ _find_notification still raises on ambiguity rather than guessing, because a
 rejection applied to the wrong notification marks a live position as failed
 while the failed one still looks healthy.
 
+EVERY HANDLER THAT CHANGES AN ITEM STATE CALLS BACK TO THE INTENT.
+
+An intent is ACTED only when every flow is ACCEPTED, and acceptance arrives
+here. Without the callback an intent never leaves ACTING, which would defeat
+the choice that ACTED means accepted rather than sent -- and the sweep would
+show every submission as outstanding forever.
+
+The callback is best-effort: it is wrapped so that a failure to reconcile does
+not lose the item state change, which is the more important record. A stale
+intent is a reporting problem; a lost acceptance is a settlement one.
+
 Handlers raise on failure. The router records the exception on Received and
 carries on -- a handler failure is our problem and must not change the
 acknowledgement we send, which is about whether the file parsed.
@@ -28,13 +39,15 @@ acknowledgement we send, which is about whether the file parsed.
 
 from __future__ import annotations
 
+import logging
+
 from psycopg import Connection
 
-from .. import db
+from .. import db, service, states
 from ..idd.file import Header, Node
-from . import ecvaa
-from .. import db, states
 from . import ecvaa, svaa
+
+log = logging.getLogger(__name__)
 
 
 class HandlerError(RuntimeError):
@@ -44,6 +57,27 @@ class HandlerError(RuntimeError):
     record of sending. Worth alerting on, because either our records are wrong
     or the feedback is not ours.
     """
+
+
+def _reconcile(conn: Connection, outbound_file_id: int, what: str) -> None:
+    """Re-resolve the intent that owns a file, if any.
+
+    Best-effort by design. The item state change has already been recorded and
+    is the record that matters; failing to update the intent leaves a
+    reporting inconsistency, not a settlement one. Raising here would undo the
+    acceptance we just recorded.
+
+    Files with no intent are normal: registration submissions and anything
+    sent manually.
+    """
+    try:
+        state = service.reconcile_intent(conn, outbound_file_id)
+    except Exception as exc:  # noqa: BLE001 - logged, not raised
+        log.error("could not reconcile intent for %s: %s", what, exc)
+        return
+
+    if state:
+        log.info("intent for %s is now %s", what, state)
 
 
 class EcvaaHandlers:
@@ -97,6 +131,7 @@ class EcvaaHandlers:
                 transaction_id=acceptance.transaction_id,
                 first_effective_period=acceptance.first_effective_period,
             )
+            _reconcile(conn, file_id, acceptance.our_filename)
 
     # --- E0091 rejection ----------------------------------------------------
 
@@ -125,6 +160,12 @@ class EcvaaHandlers:
                     p.settlement_period: rejection.reason for p in rejection.periods
                 },
             )
+
+            # The rejection found the notification by business key, so the
+            # file id has to be read back before the intent can be found.
+            file_id = _file_for_notification(conn, notification_id)
+            if file_id is not None:
+                _reconcile(conn, file_id, rejection.reference_code)
 
     # --- E0521 WMAN exception ----------------------------------------------
 
@@ -160,6 +201,7 @@ class EcvaaHandlers:
                             f"{exception.settlement_date} period "
                             f"{exception.settlement_period}, which we have no record of"
                         )
+                _reconcile_wman(conn, exception)
                 return
 
             rejected = db.reject_wman(
@@ -173,6 +215,7 @@ class EcvaaHandlers:
                     f"{filename}: WMAN rejection for {exception.settlement_date} "
                     f"period {exception.settlement_period}, which we have no record of"
                 )
+            _reconcile_wman(conn, exception)
 
 
 def _find_notification(
@@ -206,6 +249,33 @@ def _find_notification(
     return ids[0]
 
 
+def _file_for_notification(conn: Connection, notification_id: int) -> int | None:
+    row = conn.execute(
+        "SELECT outbound_file_id FROM notification WHERE id = %s",
+        (notification_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _reconcile_wman(conn: Connection, exception: ecvaa.WmanException) -> None:
+    """Re-resolve the intents behind a rejected WMAN.
+
+    A WMAN exception names a settlement date and period rather than a file, so
+    the files have to be found by what they contained. There may be several:
+    one BM Unit per row, and a period can carry more than one.
+    """
+    rows = conn.execute(
+        """SELECT DISTINCT outbound_file_id FROM wman
+            WHERE settlement_date = %s AND settlement_period = %s""",
+        (exception.settlement_date, exception.settlement_period),
+    ).fetchall()
+
+    for (file_id,) in rows:
+        _reconcile(
+            conn, file_id,
+            f"WMAN {exception.settlement_date} period {exception.settlement_period}",
+        )
+
 
 class SvaaHandlers:
     """SVAA feedback on expected volumes and delivered volumes.
@@ -237,6 +307,7 @@ class SvaaHandlers:
                         f"BM Unit id, so correlation needs exactly one."
                     )
                 db.accept_sev(conn, ids[0])
+                _reconcile_item(conn, "sev", ids[0], acceptance.bmu_id)
 
     def sev_rejection(self, header: Header, body: list[Node], filename: str) -> None:
         rejections = svaa.parse_sev_rejections(body)
@@ -259,14 +330,16 @@ class SvaaHandlers:
                 db.reject_sev(
                     conn, ids[0], rejection.reason, rejection.settlement_period
                 )
+                _reconcile_item(conn, "sev", ids[0], rejection.bmu_id)
 
     def sev_warning(self, header: Header, body: list[Node], filename: str) -> None:
         """A Submitted pair has an expected volume of zero for a period.
 
-        Not a rejection: the submission stands and no state changes. But a
-        zero usually means a forecast produced nothing rather than genuinely
-        expecting nothing, so it is recorded for investigation before the
-        deviation is measured against it.
+        Not a rejection: the submission stands and no state changes, so no
+        intent reconciliation either. But a zero usually means a forecast
+        produced nothing rather than genuinely expecting nothing, so it is
+        recorded for investigation before the deviation is measured against
+        it.
         """
         warnings = svaa.parse_sev_warnings(body)
         with self._connect() as conn:
@@ -295,6 +368,7 @@ class SvaaHandlers:
                 )
             for delivered_id in ids:
                 db.accept_delivered(conn, delivered_id)
+                _reconcile_delivered(conn, delivered_id)
 
     def delivered_rejection(
         self, header: Header, body: list[Node], filename: str
@@ -319,6 +393,52 @@ class SvaaHandlers:
                 db.reject_delivered(
                     conn, ids[0], rejection.reason, rejection.settlement_period
                 )
+                _reconcile_delivered(conn, ids[0])
+
+
+def _reconcile_item(
+    conn: Connection, table: str, item_id: int, what: str
+) -> None:
+    """Re-resolve the intent behind an item, found via its file."""
+    row = conn.execute(
+        f"SELECT outbound_file_id FROM {table} WHERE id = %s", (item_id,),
+    ).fetchone()
+    if row and row[0]:
+        _reconcile(conn, row[0], what)
+
+
+def _reconcile_delivered(conn: Connection, delivered_id: int) -> None:
+    """Update a delivered_intent from its delivered_volume row.
+
+    Delivered volumes are their own intent kind rather than a flow on a
+    trading intent, so they do not go through reconcile_intent. The mapping is
+    direct: the item state becomes the intent state.
+    """
+    row = conn.execute(
+        """SELECT outbound_file_id, state FROM delivered_volume WHERE id = %s""",
+        (delivered_id,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return
+
+    from .. import intents
+
+    state = {
+        states.ACCEPTED: intents.ACTED,
+        states.REJECTED: intents.PARTIAL,
+    }.get(row[1])
+
+    if state is None:
+        return
+
+    with conn.transaction():
+        conn.execute(
+            """UPDATE delivered_intent
+                  SET state = %s,
+                      completed_at = CASE WHEN %s THEN now() ELSE completed_at END
+                WHERE outbound_file_id = %s""",
+            (state, state == intents.ACTED, row[0]),
+        )
 
 
 class EcvnaaHandler:
