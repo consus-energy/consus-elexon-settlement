@@ -353,8 +353,13 @@ def sweep(args: argparse.Namespace) -> int:
         urgency = deadlines.urgency(settlement_date, settlement_period, now)
         message = f"file {file_id} ({state}): {urgency}"
         if urgency.level in ("CRITICAL", "MISSED"):
+            # The [LEVEL] suffix is matched by the gate-closure log metric in
+            # infra/alerts.tf, which is what pages a human. Changing this
+            # format silently disables the alert -- the logs would still look
+            # correct and nobody would be told.
             log.error("%s [%s]", message, urgency.level)
             critical.append(file_id)
+            
         elif urgency.level == "WARNING":
             log.warning("%s [%s]", message, urgency.level)
         else:

@@ -104,3 +104,19 @@ variable "connector_cidr" {
   type    = string
   default = "10.20.1.0/28"
 }
+
+
+variable "alert_emails" {
+  description = <<-EOT
+    Who is told when a submission is at Gate Closure. Named individuals rather
+    than a shared inbox: an alert nobody owns is an alert nobody reads, and
+    the response to this one is a person performing the manual fallback.
+  EOT
+  type    = list(string)
+  default = []
+
+  validation {
+    condition     = length(var.alert_emails) > 0
+    error_message = "At least one alert recipient is required. An unmonitored gateway is worse than no gateway: it looks like it is working."
+  }
+}
