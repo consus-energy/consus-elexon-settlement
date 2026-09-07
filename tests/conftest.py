@@ -62,16 +62,17 @@ def channel(conn) -> db.Channel:
     return make_channel(conn)
 
 
-def make_channel(conn, role="EN", participant="CONSUSEN", flag="TST1") -> db.Channel:
+def make_channel(conn, role="EN", participant="CONSUSEN", flag="TST1",
+                 to_role="EC", to_participant="ECVAA") -> db.Channel:
     with conn.transaction():
         conn.execute(
             """INSERT INTO channel (from_role_code, from_participant_id,
                                     to_role_code, to_participant_id, test_flag)
-                    VALUES (%s, %s, 'EC', 'ECVAA', %s)""",
-            (role, participant, flag),
+                    VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT DO NOTHING""",
+            (role, participant, to_role, to_participant, flag),
         )
-    return db.get_channel(conn, role, participant, "EC", "ECVAA", flag)
-
+    return db.get_channel(conn, role, participant, to_role, to_participant, flag)
 
 def built_file(conn, channel, file_type="E0041001") -> int:
     """A file reserved and marked built, ready to be sent.
