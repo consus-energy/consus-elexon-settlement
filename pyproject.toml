@@ -21,7 +21,6 @@ artifacts = ["*.sql"]
 testpaths = ["tests"]
 
 [dependency-groups]
-[dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "xlrd>=2.0.2",
