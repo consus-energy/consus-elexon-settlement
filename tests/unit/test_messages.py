@@ -157,7 +157,7 @@ def test_revision_defaults_to_one():
     """The common case is a first decision. Requiring the EMS to send 1
     explicitly would be noise, and 1 is the only sensible default."""
     payload = a_trading_payload()
-    del payload["revision"] if "revision" in payload else None
+    payload.pop("revision", None)
     assert messages.to_intent(payload).revision == 1
 
 

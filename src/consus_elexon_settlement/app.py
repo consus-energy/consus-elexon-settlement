@@ -13,12 +13,18 @@ the wrong place.
 The Gateway returned at the end holds the two halves -- receiver and sender --
 and does not decide when either runs. That depends on Gate Closure, which is a
 business concern rather than a wiring one.
+
+The environment helpers at the bottom are public because cli and ems both need
+them. Reading configuration is composition, not command-line handling, so this
+is where they belong.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import db
 from .archive import Archive
@@ -28,9 +34,12 @@ from .inbound.handlers import EcvaaHandlers, EcvnaaHandler, SvaaHandlers
 from .inbound.receiver import Collected, Receiver
 from .inbound.reports import ReportHandler
 from .inbound.router import Handler, Router
+from .outbound.gpg import GpgCipher
 from .outbound.sender import Sender
-from .outbound.transport import Transport
 from .outbound.submissions import Submitter
+from .outbound.transport import Cipher, NullCipher, Transport
+
+log = logging.getLogger(__name__)
 
 # IDD 2.2.1 field 10: the test data flag. 'OPER' or omitted means operational;
 # any other value is a test phase. Held here so the comparison is in one place.
@@ -91,8 +100,8 @@ class Config:
         'send this to live settlement'.
         """
         return cls(
-            vtp=Identity("VT", _require("CONSUS_VTP_PARTICIPANT")),
-            ecvna=Identity("EN", _require("CONSUS_ECVNA_PARTICIPANT")),
+            vtp=Identity("VT", require_env("CONSUS_VTP_PARTICIPANT")),
+            ecvna=Identity("EN", require_env("CONSUS_ECVNA_PARTICIPANT")),
             environment=os.environ.get("CONSUS_ENVIRONMENT", "TST1"),
         )
 
@@ -138,7 +147,7 @@ class Handlers:
 class Gateway:
     """The assembled gateway.
 
-    Holds the two halves and offers the verbs a scheduler needs. It does not
+    Holds the pieces and offers the verbs a scheduler needs. It does not
     decide when to call them: that depends on Gate Closure, which is a
     business concern rather than a wiring one.
     """
@@ -146,7 +155,6 @@ class Gateway:
     receiver: Receiver
     sender: Sender
     submitter: Submitter
-
 
     def collect(self) -> list[Collected]:
         """Archive, record, route and acknowledge every waiting file.
@@ -309,26 +317,19 @@ def response_filename(received: str) -> str:
     return received
 
 
-def _no_key_store(ecvnaa_id: str, key: str) -> str:
-    """The default store_key: refuse rather than discard.
+# --- environment -------------------------------------------------------------
+#
+# Public because cli and ems both need them. Reading configuration is
+# composition, not command-line handling, so a module reaching into cli for a
+# private helper would be reaching into the wrong place.
 
-    An ECVNAA Key arrives exactly once, in E0071, and is required on every
-    subsequent ECVN. A deployment that forgets to configure a secret store
-    would otherwise receive the key, acknowledge the file, throw the key away,
-    and then be unable to submit anything -- with nothing in the logs to say
-    why. Failing here is far cheaper than diagnosing that later.
-    """
-    raise RuntimeError(
-        f"an ECVNAA key arrived for {ecvnaa_id} but no secret store was configured. "
-        f"Pass store_key to app.build. Without it, no ECVN can be submitted."
-    )
 
 def require_env(name: str) -> str:
     """Read an environment variable, failing if it is absent.
 
-    Public because cli and ems both need it. A gateway that starts with a
-    missing participant id, bucket or DSN sends files that are rejected, and
-    the failure surfaces at Gate Closure rather than at startup.
+    A gateway that starts with a missing participant id, bucket or DSN sends
+    files that are rejected, and the failure surfaces at Gate Closure rather
+    than at startup.
     """
     value = os.environ.get(name)
     if not value:
@@ -357,7 +358,8 @@ def build_cipher() -> Cipher:
 
     NullCipher is returned only when no keyring is configured, which is a
     development convenience. It logs loudly because sending unencrypted to a
-    central system is not a thing that should happen quietly.
+    central system is not a thing that should happen quietly, and the log
+    metric in infra/alerts.tf matches on the word UNENCRYPTED.
     """
     gnupg_home = os.environ.get("CONSUS_GNUPGHOME")
     if not gnupg_home:
@@ -372,4 +374,19 @@ def build_cipher() -> Cipher:
         their_key=os.environ.get("CONSUS_GPG_RECIPIENT", "Central-Services-01"),
         home_dir=Path(gnupg_home),
         passphrase=read_secret_file("CONSUS_GPG_PASSPHRASE_FILE"),
+    )
+
+
+def _no_key_store(ecvnaa_id: str, key: str) -> str:
+    """The default store_key: refuse rather than discard.
+
+    An ECVNAA Key arrives exactly once, in E0071, and is required on every
+    subsequent ECVN. A deployment that forgets to configure a secret store
+    would otherwise receive the key, acknowledge the file, throw the key away,
+    and then be unable to submit anything -- with nothing in the logs to say
+    why. Failing here is far cheaper than diagnosing that later.
+    """
+    raise RuntimeError(
+        f"an ECVNAA key arrived for {ecvnaa_id} but no secret store was configured. "
+        f"Pass store_key to app.build. Without it, no ECVN can be submitted."
     )
