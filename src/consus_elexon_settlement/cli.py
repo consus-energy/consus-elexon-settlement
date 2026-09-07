@@ -33,7 +33,7 @@ import sys
 from pathlib import Path
 
 from . import app, db, deadlines, states
-from .app import require_env as _require
+from .app import build_cipher, read_secret_file, require_env as _require
 from . import migrate as migrations
 from .archive import Archive, GcsArchive, LocalArchive
 from .outbound.gpg import GpgCipher
@@ -122,47 +122,6 @@ def _transport() -> Transport:
     cipher = _cipher()
     log.info("transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__)
     return EncryptedTransport(inner=inner, cipher=cipher)
-
-def _cipher() -> Cipher:
-    """The cipher.
-
-    Every file exchanged with central systems is signed with our private key
-    and encrypted with theirs. Elexon's communications team confirmed the
-    requirement is compatibility with XSec rather than XSec itself, and
-    supplied the equivalent gpg parameters. Interoperability has been
-    confirmed in both directions with Central Services -- see ADR-0011.
-
-    NullCipher is returned only when no keyring is configured, which is a
-    development convenience. It logs loudly because sending unencrypted to a
-    central system is not a thing that should happen quietly.
-    """
-    gnupg_home = os.environ.get("CONSUS_GNUPGHOME")
-    if not gnupg_home:
-        log.warning(
-            "CONSUS_GNUPGHOME is not set: files will be sent UNENCRYPTED. "
-            "This is a development mode only."
-        )
-        return NullCipher()
-
-    return GpgCipher(
-        our_key=_require("CONSUS_GPG_KEY"),
-        their_key=os.environ.get("CONSUS_GPG_RECIPIENT", "Central-Services-01"),
-        home_dir=Path(gnupg_home),
-        passphrase=_read_secret_file("CONSUS_GPG_PASSPHRASE_FILE"),
-    )
-
-
-def _read_secret_file(name: str) -> str:
-    """Read a secret mounted as a file.
-
-    Cloud Run mounts secrets as files rather than environment variables, and
-    that is the right way round: a value in the environment is readable
-    through /proc by anything in the container.
-    """
-    path = os.environ.get(name)
-    if not path:
-        raise RuntimeError(f"{name} is not set")
-    return Path(path).read_text().strip()
 
 
 def _key_store():

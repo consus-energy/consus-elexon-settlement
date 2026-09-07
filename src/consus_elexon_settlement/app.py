@@ -334,3 +334,42 @@ def require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is not set")
     return value
+
+
+def read_secret_file(name: str) -> str:
+    """Read a secret mounted as a file.
+
+    Cloud Run mounts secrets as files rather than environment variables, and
+    that is the right way round: a value in the environment is readable
+    through /proc by anything in the container.
+    """
+    path = require_env(name)
+    return Path(path).read_text().strip()
+
+
+def build_cipher() -> Cipher:
+    """The cipher, chosen by what is configured.
+
+    Elexon's communications team confirmed the requirement is compatibility
+    with XSec rather than XSec itself, and supplied the equivalent gpg
+    parameters. Interoperability was confirmed in both directions with Central
+    Services -- see ADR-0011.
+
+    NullCipher is returned only when no keyring is configured, which is a
+    development convenience. It logs loudly because sending unencrypted to a
+    central system is not a thing that should happen quietly.
+    """
+    gnupg_home = os.environ.get("CONSUS_GNUPGHOME")
+    if not gnupg_home:
+        log.warning(
+            "CONSUS_GNUPGHOME is not set: files will be sent UNENCRYPTED. "
+            "This is a development mode only."
+        )
+        return NullCipher()
+
+    return GpgCipher(
+        our_key=require_env("CONSUS_GPG_KEY"),
+        their_key=os.environ.get("CONSUS_GPG_RECIPIENT", "Central-Services-01"),
+        home_dir=Path(gnupg_home),
+        passphrase=read_secret_file("CONSUS_GPG_PASSPHRASE_FILE"),
+    )

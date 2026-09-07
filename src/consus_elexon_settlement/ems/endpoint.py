@@ -44,7 +44,7 @@ from flask import Flask, jsonify, request
 from .. import app as gateway_app
 from .. import db, service
 from ..archive import GcsArchive
-from ..cli import _cipher
+from ..app import build_cipher, read_secret_file, require_env as _require
 from ..app import require_env as _require
 
 from . import messages
