@@ -119,6 +119,10 @@ def create_app() -> Flask:
         try:
             if kind == messages.TRADING:
                 outcome = intent_service.act(messages.to_intent(payload))
+            elif kind == messages.DEFAULT_SEV:
+                outcome = intent_service.register_default_sev(
+                    messages.to_default_sev(payload)
+                )
             else:
                 outcome = intent_service.deliver(messages.to_delivered(payload))
         except messages.MessageError as exc:

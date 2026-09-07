@@ -340,3 +340,57 @@ class DeliveredIntent:
     def key(self) -> tuple[dt.date, int, str, int, int]:
         return (self.settlement_date, self.settlement_period,
                 self.bmu_id, self.import_msid, self.revision)
+
+
+@dataclass(frozen=True)
+class DefaultSevIntent:
+    """A Default Submitted Expected Volume, from the EMS.
+
+    Its own kind rather than a trading intent with no trade. A Default is a
+    standing profile registered by 23:59 the day before it takes effect
+    (BSCP602 2.13.1), covering every period rather than one, and it exists
+    whether or not we intend to trade.
+
+    It is the safety net. If neither a Default nor a per-period value is
+    registered before Gate Closure, SVAA sets Settlement Expected Volume to
+    NULL and the deviation is lost entirely (2.13.7). A Default costs nothing
+    and removes that failure mode.
+
+    Volumes are in CVA convention: positive is Export, negative is Import.
+    Site load is an import, so a site-load profile is negative throughout.
+    """
+
+    effective_from: dt.date
+    bmu_id: str
+    periods: tuple[tuple[int, Decimal], ...]
+    revision: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.periods:
+            raise ValueError("a Default SEV with no periods registers nothing")
+        ids = [p for p, _ in self.periods]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate settlement period")
+        if ids != sorted(ids):
+            raise ValueError("settlement periods must be in ascending order")
+        for period, _ in self.periods:
+            if not 1 <= period <= 50:
+                raise ValueError(f"settlement period out of range: {period}")
+
+    @property
+    def key(self) -> tuple[dt.date, str, int]:
+        """Effective date and BM Unit. No settlement period: a Default covers
+        all of them."""
+        return (self.effective_from, self.bmu_id, self.revision)
+
+    @property
+    def covers_full_day(self) -> bool:
+        """Whether every period on the effective date has a value.
+
+        Not enforced -- a partial Default is valid and covers what it covers --
+        but worth knowing, because a Default that misses periods leaves those
+        periods exposed to the NULL in 2.13.7.
+        """
+        from . import deadlines
+
+        return len(self.periods) == deadlines.periods_in_day(self.effective_from)

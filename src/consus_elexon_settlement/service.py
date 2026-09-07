@@ -398,6 +398,65 @@ class IntentService:
             )
         return Outcome(intent_id, state, {DELIVERED: state})
 
+
+
+    def register_default_sev(
+        self, default: intents.DefaultSevIntent
+    ) -> Outcome:
+        """Register a standing expected volume profile.
+
+        Not routed through the flow machinery: a Default is one file, not
+        three, and has no Gate Closure to miss -- its deadline is 23:59 the
+        day before, which is the EMS's to meet rather than ours to enforce.
+
+        Idempotent on effective date, BM Unit and revision. Republishing the
+        same profile sends nothing; a corrected profile is a new revision.
+        """
+        with self._connect() as conn:
+            existing = _find_default_sev(conn, default.key)
+            if existing is not None:
+                intent_id, state = existing
+                return Outcome(intent_id, state, {}, duplicate=True)
+
+            intent_id = _record_default_sev(conn, default)
+
+        try:
+            sent = self._submitter.sev(
+                self._channels.vtp_to_svaa,
+                Sev(
+                    effective_from=default.effective_from,
+                    # No effective_to. That is what makes it a Default: it
+                    # stands until replaced rather than covering one day.
+                    units=(UnitVolumes(default.bmu_id, tuple(
+                        ExpectedPeriod(period, volume)
+                        for period, volume in default.periods
+                    )),),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            with self._connect() as conn:
+                _set_default_sev_state(
+                    conn, intent_id, intents.PARTIAL, detail=str(exc)[:500]
+                )
+            return Outcome(intent_id, intents.PARTIAL, {})
+
+        state = intents.ACTING if sent.delivered else intents.PARTIAL
+        with self._connect() as conn:
+            _set_default_sev_state(
+                conn, intent_id, state,
+                detail=sent.error, outbound_file_id=sent.file_id,
+            )
+
+        if not default.covers_full_day:
+            log.warning(
+                "default SEV for %s on %s covers %d periods, not the full day. "
+                "Periods without a value fall to NULL if no per-period SEV is "
+                "registered before Gate Closure (BSCP602 2.13.7).",
+                default.bmu_id, default.effective_from, len(default.periods),
+            )
+
+        return Outcome(intent_id, state, {"sev": state})
+
     # --- resolution ---------------------------------------------------------
 
     def _resolve(

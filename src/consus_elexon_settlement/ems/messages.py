@@ -38,6 +38,7 @@ from .. import intents
 
 TRADING = "trading"
 DELIVERED = "delivered"
+DEFAULT_SEV = "default_sev"
 
 
 class MessageError(ValueError):
@@ -95,9 +96,10 @@ def message_id(envelope: dict) -> str:
 
 def kind(payload: dict) -> str:
     value = payload.get("kind")
-    if value not in (TRADING, DELIVERED):
+    if value not in (TRADING, DELIVERED, DEFAULT_SEV):
         raise MessageError(
-            f"'kind' must be {TRADING!r} or {DELIVERED!r}, got {value!r}"
+            f"'kind' must be one of {TRADING!r}, {DELIVERED!r}, "
+            f"{DEFAULT_SEV!r}, got {value!r}"
         )
     return value
 
@@ -144,6 +146,54 @@ def to_delivered(payload: dict) -> intents.DeliveredIntent:
             import_msid=_int(payload, "import_msid"),
             export_msid=_optional_int(payload, "export_msid"),
             delivered_mwh=_decimal(payload, "delivered_mwh"),
+        )
+    except ValueError as exc:
+        raise MessageError(str(exc)) from exc
+
+
+def to_default_sev(payload: dict) -> intents.DefaultSevIntent:
+    """A standing expected volume profile.
+
+    Periods arrive as an object keyed by period number rather than a list,
+    because a Default may legitimately be partial and a sparse list would be
+    ambiguous about which periods it covered.
+
+        {"periods": {"1": "-0.0800", "2": "-0.0800", ...}}
+
+    JSON object keys are strings, so the period numbers are parsed rather than
+    read as integers.
+    """
+    periods_raw = payload.get("periods")
+    if not isinstance(periods_raw, dict) or not periods_raw:
+        raise MessageError("'periods' must be a non-empty object of period to volume")
+
+    periods = []
+    for key, value in periods_raw.items():
+        try:
+            period = int(key)
+        except (TypeError, ValueError) as exc:
+            raise MessageError(
+                f"period key {key!r} is not an integer"
+            ) from exc
+
+        if isinstance(value, float):
+            raise MessageError(
+                f"period {period} volume must be a string, not a JSON number: "
+                f"a float carries binary rounding into a settled volume."
+            )
+        try:
+            periods.append((period, Decimal(str(value))))
+        except InvalidOperation as exc:
+            raise MessageError(
+                f"period {period} volume is not a decimal: {value!r}"
+            ) from exc
+
+    try:
+        return intents.DefaultSevIntent(
+            effective_from=_date(payload, "effective_from"),
+            bmu_id=_str(payload, "bmu_id"),
+            revision=_int(payload, "revision", default=1),
+            periods=tuple(sorted(periods)),
         )
     except ValueError as exc:
         raise MessageError(str(exc)) from exc
