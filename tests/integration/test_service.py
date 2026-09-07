@@ -95,16 +95,28 @@ def build_service(conn, tmp_path: Path, transport) -> service.IntentService:
 def registered_key(conn):
     """An authorisation with a key reference, so the ECVN can be built.
 
+    counterparty_id, our_pc_flag and effective_from are NOT NULL: an
+    authorisation is a standing agreement between two named parties from a
+    date, established manually under BSCP71, and a row without those is not
+    an authorisation.
+
+    our_pc_flag is 'P' or 'C' -- which side of the contract we are. It
+    determines the sign convention on the ECVN, since volume is signed from
+    party 1 to party 2.
+
     _read_secret still raises -- the secret store is not wired -- so tests
-    that need a successful ECVN patch it. This fixture only satisfies the
+    needing a successful ECVN patch it. This fixture only satisfies the
     lookup that happens first.
     """
     with conn.transaction():
         conn.execute(
-            """INSERT INTO ecvnaa (ecvnaa_id, key_secret_ref)
-                    VALUES ('AUTH000001', 'projects/x/secrets/y/versions/1')
+            """INSERT INTO ecvnaa (ecvnaa_id, key_secret_ref, counterparty_id,
+                                   our_pc_flag, effective_from)
+                    VALUES ('AUTH000001', 'projects/x/secrets/y/versions/1',
+                            'COUNTERP', 'P', %s)
                ON CONFLICT (ecvnaa_id) DO UPDATE
-                    SET key_secret_ref = EXCLUDED.key_secret_ref"""
+                    SET key_secret_ref = EXCLUDED.key_secret_ref""",
+            (DATE,),
         )
 
 

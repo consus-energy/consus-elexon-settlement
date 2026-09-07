@@ -203,26 +203,49 @@ class IntentService:
         others: a WMAN that fails should not prevent the ECVN, because a
         partial submission is more recoverable than none and the retry knows
         which is which.
+
+        A flow that already has a file is RESENT, not rebuilt. Its file
+        reached the archive and only transport failed, so the bytes exist and
+        the sequence number is already spent on them. Rebuilding would
+        allocate a second number, leave a permanent gap at the first, and --
+        because the ECVN reference code is deterministic -- collide with the
+        notification row the first attempt already wrote.
+
+        That collision is what made this visible rather than silent. Without
+        it every transport failure would have been unrecoverable: the retry
+        failing forever on a unique constraint, the intent stuck at PARTIAL,
+        and the position unhedged. It is the same discipline as ADR-0002, one
+        layer up.
         """
         with self._connect() as conn:
             _ensure_flows(conn, intent_id, intents.REQUIRED_FLOWS)
             outstanding = intents.retryable_flows(_flow_states(conn, intent_id))
 
-        senders = {
+        builders = {
             "wman": self._send_wman,
             "ecvn": self._send_ecvn,
             "sev": self._send_sev,
         }
 
         for flow in outstanding:
+            existing = self._file_for_flow(intent_id, flow)
+
             try:
-                sent = senders[flow](intent)
+                if existing is not None:
+                    # Built already; only the wire failed.
+                    sent = self._submitter.resend(existing)
+                else:
+                    sent = builders[flow](intent)
             except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
-                # A build failure, a missing channel, a transport error we did
-                # not anticipate. Recorded against the flow rather than raised,
-                # so the other flows still get their turn.
-                log.error("intent %s: %s failed to build: %s",
-                          intent.key, flow, exc)
+                # A build failure, a missing channel, an unanticipated
+                # transport error. Recorded against the flow rather than
+                # raised, so the other flows still get their turn.
+                log.error(
+                    "intent %s: %s failed to %s: %s",
+                    intent.key, flow,
+                    "resend" if existing is not None else "build",
+                    exc,
+                )
                 with self._connect() as conn:
                     _record_flow(conn, intent_id, flow, intents.FAILED,
                                  detail=str(exc)[:500])
@@ -239,6 +262,20 @@ class IntentService:
                             intent.key, flow, sent.error)
 
         return self._resolve(intent_id, intent)
+
+    def _file_for_flow(self, intent_id: int, flow: str) -> int | None:
+        """The file this flow already built, if any.
+
+        Its presence is what distinguishes 'transport failed' from 'never got
+        that far'. The first is resent; the second is built.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT outbound_file_id FROM intent_flow
+                    WHERE intent_id = %s AND flow = %s""",
+                (intent_id, flow),
+            ).fetchone()
+        return row[0] if row and row[0] else None
 
     def _send_wman(self, intent: intents.Intent) -> Sent:
         return self._submitter.wman(
@@ -257,7 +294,7 @@ class IntentService:
         # Revision is included so a revised position gets its own code.
         reference = (
             f"R{intent.settlement_date:%y%m%d}"
-            f"{intent.settlement_period:02d}{intent.revision:02d}"
+            f"{intent.settlement_period:02d}{intent.revision:d}"
         )
         return self._submitter.ecvn(
             self._channels.agent_to_ecvaa,

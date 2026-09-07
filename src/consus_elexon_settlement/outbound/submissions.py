@@ -202,6 +202,22 @@ class Submitter:
 
         return self._mark(sent, "delivered_volume")
 
+        # --- retry --------------------------------------------------------------
+
+    def resend(self, file_id: int) -> Sent:
+        """Re-send a file that was already built and archived.
+
+        For a flow whose first attempt reached the archive but failed at
+        transport. Delegates to the sender, which reads the bytes back rather
+        than rebuilding.
+
+        No domain rows are touched. They exist from the first attempt and are
+        still PENDING, which is exactly what makes them findable -- and what a
+        rebuild would collide with, since the reference code is deterministic
+        and the business key is unique.
+        """
+        return self._sender.retry(file_id)
+
     # --- internals ---------------------------------------------------------
 
     def _mark(self, sent: Sent, table: str) -> Sent:
