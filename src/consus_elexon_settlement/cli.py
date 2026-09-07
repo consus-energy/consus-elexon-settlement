@@ -44,6 +44,8 @@ from .outbound.transport import (
     Transport,
 )
 
+from .outbound.ftp import FtpTransport
+
 log = logging.getLogger("consus.settlement")
 
 
@@ -85,18 +87,40 @@ def _archive() -> Archive:
 def _transport() -> Transport:
     """Transport, wrapped in encryption.
 
-    The process writes into a folder; how that folder reaches Elexon is the
-    transport's problem, not this function's.
+    FTP when a host is configured, local directories otherwise. Local is for
+    development and for the period before Elexon supply the endpoint; it is
+    not a fallback that should ever be reached in an operational environment,
+    which is why it logs.
     """
-    inner: Transport = LocalTransport(
-        outbox=Path(_require("CONSUS_OUTBOX")),
-        inbox=Path(_require("CONSUS_INBOX")),
-    )
+    host = os.environ.get("CONSUS_FTP_HOST")
+    inner: Transport
+    if host:
+        inner = FtpTransport(
+            host=host,
+            port=int(os.environ.get("CONSUS_FTP_PORT", "21")),
+            username=_require("CONSUS_FTP_USER"),
+            password=_read_secret_file("CONSUS_FTP_PASSWORD_FILE"),
+            outbound_dir=_require("CONSUS_FTP_OUTBOUND_DIR"),
+            inbound_dir=_require("CONSUS_FTP_INBOUND_DIR"),
+            # Defaults to TLS. Whether Elexon use FTPS or plain FTP is an
+            # open question; defaulting to the insecure option would be the
+            # wrong way round.
+            tls=os.environ.get("CONSUS_FTP_TLS", "1") != "0",
+            passive=os.environ.get("CONSUS_FTP_PASSIVE", "1") != "0",
+        )
+    else:
+        log.warning(
+            "CONSUS_FTP_HOST is not set: using local directories. Nothing "
+            "will reach Elexon."
+        )
+        inner = LocalTransport(
+            outbox=Path(_require("CONSUS_OUTBOX")),
+            inbox=Path(_require("CONSUS_INBOX")),
+        )
 
     cipher = _cipher()
     log.info("transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__)
     return EncryptedTransport(inner=inner, cipher=cipher)
-
 
 def _cipher() -> Cipher:
     """The cipher.
