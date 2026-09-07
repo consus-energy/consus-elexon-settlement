@@ -39,3 +39,13 @@ output "vpc_connector" {
   value       = google_vpc_access_connector.gateway.name
 }
 
+
+output "ems_endpoint" {
+  description = "Internal only; reachable from the VPC and Pub/Sub, not the internet."
+  value       = google_cloud_run_v2_service.ems.uri
+}
+
+output "intents_topic" {
+  description = "Where the EMS publishes. Grant publish via var.ems_publishers."
+  value       = google_pubsub_topic.intents.id
+}

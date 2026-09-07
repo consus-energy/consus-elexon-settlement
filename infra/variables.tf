@@ -131,3 +131,36 @@ variable "absence_alerts_enabled" {
   type    = bool
   default = true
 }
+
+variable "svaa_role_code" {
+  description = <<-EOT
+    SVAA's role code in the AAA header. 'G' is confirmed from the P0237
+    physical file specification in the SVA Data Catalogue, where SVAA appears
+    as the From Role Code.
+  EOT
+  type    = string
+  default = "G"
+}
+
+variable "svaa_participant_id" {
+  description = <<-EOT
+    SVAA's participant id. NOT confirmed: the SVA Data Catalogue writes it as
+    "Id of SVAA" rather than a literal, and UKDC is confirmed for ECVAA only.
+    Open question with Elexon.
+  EOT
+  type    = string
+  default = "UKDC"
+}
+
+variable "ems_publishers" {
+  description = <<-EOT
+    Principals allowed to publish intents, e.g.
+    ["serviceAccount:ems@consus-ems.iam.gserviceaccount.com"].
+
+    The EMS runs in its own project, so this is a cross-project grant and the
+    only access it has here. Publishing an intent is submitting a settlement
+    position, so the list should be short and named.
+  EOT
+  type    = list(string)
+  default = []
+}
