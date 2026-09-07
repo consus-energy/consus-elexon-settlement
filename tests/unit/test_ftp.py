@@ -51,6 +51,7 @@ def server(ftp_root: Path):
     yield srv.address
 
     srv.close_all()
+    thread.join(timeout=2)
 
 
 @pytest.fixture

@@ -30,6 +30,7 @@ from .inbound.reports import ReportHandler
 from .inbound.router import Handler, Router
 from .outbound.sender import Sender
 from .outbound.transport import Transport
+from .outbound.submissions import Submitter
 
 # IDD 2.2.1 field 10: the test data flag. 'OPER' or omitted means operational;
 # any other value is a test phase. Held here so the comparison is in one place.
@@ -144,6 +145,8 @@ class Gateway:
 
     receiver: Receiver
     sender: Sender
+    submitter: Submitter
+
 
     def collect(self) -> list[Collected]:
         """Archive, record, route and acknowledge every waiting file.
@@ -200,6 +203,8 @@ def build(
         report=ReportHandler(connect=connect),
     )
 
+    sender = Sender(connect=connect, archive=archive, transport=transport)
+
     return Gateway(
         receiver=Receiver(
             connect=connect,
@@ -208,7 +213,8 @@ def build(
             transport=transport,
             response_name=response_filename,
         ),
-        sender=Sender(connect=connect, archive=archive, transport=transport),
+        sender=sender,
+        submitter=Submitter(connect=connect, sender=sender),
     )
 
 
