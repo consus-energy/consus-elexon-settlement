@@ -323,8 +323,13 @@ def _no_key_store(ecvnaa_id: str, key: str) -> str:
         f"Pass store_key to app.build. Without it, no ECVN can be submitted."
     )
 
+def require_env(name: str) -> str:
+    """Read an environment variable, failing if it is absent.
 
-def _require(name: str) -> str:
+    Public because cli and ems both need it. A gateway that starts with a
+    missing participant id, bucket or DSN sends files that are rejected, and
+    the failure surfaces at Gate Closure rather than at startup.
+    """
     value = os.environ.get(name)
     if not value:
         raise RuntimeError(f"{name} is not set")

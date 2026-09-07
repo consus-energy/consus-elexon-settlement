@@ -42,10 +42,12 @@ import os
 from flask import Flask, jsonify, request
 
 from .. import app as gateway_app
-from .. import db, intents, service
+from .. import db, service
 from ..archive import GcsArchive
-from ..cli import _cipher, _require
-from .ems import messages
+from ..cli import _cipher
+from ..app import require_env as _require
+
+from . import messages
 from ..outbound.ftp import FtpTransport
 from ..outbound.sender import Sender
 from ..outbound.submissions import Submitter

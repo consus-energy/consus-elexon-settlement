@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 
 from . import app, db, deadlines, states
+from .app import require_env as _require
 from . import migrate as migrations
 from .archive import Archive, GcsArchive, LocalArchive
 from .outbound.gpg import GpgCipher
@@ -415,13 +416,6 @@ def _outstanding(conn) -> list[tuple[int, dt.date | None, int | None, str]]:
         (list(states.OUTSTANDING_FILE_STATES),),
     ).fetchall()
     return [(r[0], r[1], r[2], r[3]) for r in rows]
-
-
-def _require(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"{name} is not set")
-    return value
 
 
 def main(argv: list[str] | None = None) -> int:
