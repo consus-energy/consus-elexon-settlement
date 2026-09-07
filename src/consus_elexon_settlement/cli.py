@@ -42,7 +42,6 @@ from .outbound.transport import (
     LocalTransport,
     NullCipher,
     Transport,
-    XSecCipher,
 )
 
 log = logging.getLogger("consus.settlement")
@@ -100,45 +99,32 @@ def _transport() -> Transport:
 
 
 def _cipher() -> Cipher:
-    """The cipher, chosen by what is configured.
+    """The cipher.
 
-    Elexon's communications team confirmed the requirement is compatibility
-    with XSec rather than XSec itself, and supplied the equivalent gpg
-    parameters. gpg is preferred: it runs in the same container as everything
-    else, it is testable in CI, and it removes a Windows node from the send
-    path.
+    Every file exchanged with central systems is signed with our private key
+    and encrypted with theirs. Elexon's communications team confirmed the
+    requirement is compatibility with XSec rather than XSec itself, and
+    supplied the equivalent gpg parameters. Interoperability has been
+    confirmed in both directions with Central Services -- see ADR-0011.
 
-    XSec remains available as a fallback while gpg interoperability is being
-    confirmed with Central Services.
+    NullCipher is returned only when no keyring is configured, which is a
+    development convenience. It logs loudly because sending unencrypted to a
+    central system is not a thing that should happen quietly.
     """
     gnupg_home = os.environ.get("CONSUS_GNUPGHOME")
-    if gnupg_home:
-        return GpgCipher(
-            our_key=_require("CONSUS_GPG_KEY"),
-            their_key=os.environ.get("CONSUS_GPG_RECIPIENT", "Central-Services-01"),
-            home_dir=Path(gnupg_home),
-            passphrase=_read_secret_file("CONSUS_GPG_PASSPHRASE_FILE"),
+    if not gnupg_home:
+        log.warning(
+            "CONSUS_GNUPGHOME is not set: files will be sent UNENCRYPTED. "
+            "This is a development mode only."
         )
+        return NullCipher()
 
-    xsec_root = os.environ.get("CONSUS_XSEC_ROOT")
-    if xsec_root:
-        base = Path(xsec_root)
-        return XSecCipher(
-            encrypt_in=base / "ENCRYPT_IN",
-            encrypt_out=base / "ENCRYPT_OUT",
-            decrypt_in=base / "DECRYPT_IN",
-            decrypt_out=base / "DECRYPT_OUT",
-            error=base / "ERROR",
-            timeout_seconds=float(os.environ.get("CONSUS_XSEC_TIMEOUT", "30")),
-            match_by_name=os.environ.get("CONSUS_XSEC_MATCH_BY_NAME") == "1",
-        )
-
-    log.warning(
-        "No cipher configured: files will be sent UNENCRYPTED. Set "
-        "CONSUS_GNUPGHOME for gpg, or CONSUS_XSEC_ROOT for XSec. Correct "
-        "before the BSC communications setup completes; wrong after it."
+    return GpgCipher(
+        our_key=_require("CONSUS_GPG_KEY"),
+        their_key=os.environ.get("CONSUS_GPG_RECIPIENT", "Central-Services-01"),
+        home_dir=Path(gnupg_home),
+        passphrase=_read_secret_file("CONSUS_GPG_PASSPHRASE_FILE"),
     )
-    return NullCipher()
 
 
 def _read_secret_file(name: str) -> str:

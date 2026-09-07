@@ -28,3 +28,5 @@ the old one stays.
 | [0008](0008-receipt-is-not-acceptance.md) | Receipt acknowledgement is not acceptance |
 | [0009](0009-reports-handled-generically.md) | Reports are recorded, not modelled |
 | [0010](0010-environment-separation-by-channel.md) | Environments are separated by channel, not config |
+
+| [0011](0011-gpg-instead-of-xsec.md) | gpg instead of XSec |

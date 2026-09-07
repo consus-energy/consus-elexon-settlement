@@ -95,40 +95,6 @@ variable "log_level" {
 
 
 
-variable "xsec_zone" {
-  description = "Zone for the XSec node. Must be within var.region."
-  type        = string
-  default     = "europe-west2-a"
-}
-
-variable "xsec_machine_type" {
-  description = <<-EOT
-    Windows Server with Desktop Experience needs 4GB to be usable over RDP.
-    XSec itself is light -- encrypt a file, move bytes -- but XSecManager is
-    a GUI and the desktop is not optional if you want to configure keys.
-  EOT
-  type    = string
-  default = "e2-medium"
-}
-
-variable "xsec_image" {
-  description = "Windows Server image. Desktop rather than Core: XSecManager is a GUI and key configuration is not a one-off."
-  type        = string
-  default     = "windows-cloud/windows-2022"
-}
-
-variable "xsec_deletion_protection" {
-  description = "The private key lives on this disk. Losing it means repeating the key exchange with Elexon."
-  type        = bool
-  default     = true
-}
-
-variable "xsec_admins" {
-  description = "Principals allowed to RDP via IAP, e.g. [\"user:ethan@consusenergy.com\"]"
-  type        = list(string)
-  default     = []
-}
-
 
 variable "connector_cidr" {
   description = <<-EOT

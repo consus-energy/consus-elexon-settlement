@@ -39,17 +39,3 @@ output "vpc_connector" {
   value       = google_vpc_access_connector.gateway.name
 }
 
-
-output "xsec_instance" {
-  description = "Connect with: gcloud compute start-iap-tunnel <name> 3389 --local-host-port=localhost:3389 --zone=<zone>"
-  value       = google_compute_instance.xsec.name
-}
-
-output "xsec_zone" {
-  value = google_compute_instance.xsec.zone
-}
-
-output "handover_bucket" {
-  description = "Queue between the Cloud Run jobs and the XSec node. Not the audit archive."
-  value       = google_storage_bucket.handover.name
-}
