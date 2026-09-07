@@ -175,7 +175,7 @@ def _transport() -> Transport:
         inbound_dir=_require("CONSUS_FTP_INBOUND_DIR"),
         tls=os.environ.get("CONSUS_FTP_TLS", "1") != "0",
     )
-    return EncryptedTransport(inner=inner, cipher=_cipher())
+    return EncryptedTransport(inner=inner, cipher=build_cipher())
 
 
 # gunicorn imports this.
