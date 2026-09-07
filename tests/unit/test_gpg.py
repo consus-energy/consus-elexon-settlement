@@ -15,6 +15,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+import tempfile
 
 import pytest
 
@@ -45,17 +46,25 @@ def generate(home: Path, name: str) -> None:
 
 
 @pytest.fixture
-def keyring(tmp_path: Path) -> Path:
+def keyring() -> Path:
     """One keyring holding both identities.
 
-    In production these are separate: our private key and their public key.
-    Sharing a keyring here means one fixture can round-trip without an export
-    and import step that tests gpg rather than our code.
+    Deliberately NOT tmp_path. GPG's agent socket lives inside the homedir and
+    Unix socket paths are capped at 108 characters; pytest's tmp_path on macOS
+    is around 96 before the socket name is appended, which overflows it. The
+    failure is a bare exit code 2 with no useful message, so it is worth
+    avoiding rather than diagnosing twice.
+
+    In production these are separate keyrings -- our private key and their
+    public key. Sharing one here lets a round trip work without an export and
+    import step that would test gpg rather than our code.
     """
-    home = tmp_path / "gnupg"
-    generate(home, "CONSUSEN")
-    generate(home, "Central-Services-01")
-    return home
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="gpg-") as short:
+        home = Path(short)
+        home.chmod(0o700)
+        generate(home, "CONSUSEN")
+        generate(home, "Central-Services-01")
+        yield home
 
 
 @pytest.fixture

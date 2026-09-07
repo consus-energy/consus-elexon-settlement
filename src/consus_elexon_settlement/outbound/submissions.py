@@ -194,8 +194,9 @@ class Submitter:
                 for period in pair.periods:
                     conn.execute(
                         """INSERT INTO delivered_volume_period
-                                (delivered_volume_id, settlement_period, volume_mwh)
-                                VALUES (%s, %s, %s)""",
+                                (delivered_volume_id, settlement_period,
+                                 volume_mwh, state)
+                                VALUES (%s, %s, %s, 'PENDING')""",
                         (row[0], period.settlement_period, period.volume_mwh),
                     )
 
