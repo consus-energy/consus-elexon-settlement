@@ -718,3 +718,67 @@ def _read_secret(reference: str) -> str:
         f"secret store not configured; cannot read {reference}. The ECVNAA "
         f"key arrives in E0071 and must be written to Secret Manager."
     )
+
+
+
+# --- default expected volumes ------------------------------------------------
+#
+# A Default SEV is a standing profile rather than a decision about a period, so
+# it gets its own table rather than sharing the intent one. It covers every
+# period, exists whether or not we intend to trade, and has no Gate Closure --
+# its deadline is 23:59 the day before, which belongs to the EMS.
+
+
+def _find_default_sev(conn: Connection, key: tuple) -> tuple[int, str] | None:
+    row = conn.execute(
+        """SELECT id, state FROM default_sev_intent
+            WHERE effective_from = %s AND bmu_id = %s AND revision = %s""",
+        key,
+    ).fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def _record_default_sev(
+    conn: Connection, default: intents.DefaultSevIntent
+) -> int:
+    """Record the profile and every period it covers.
+
+    The periods are stored, not only sent, so a later question -- what did the
+    Default say for period 37 on that date -- can be answered without reading
+    the file back out of the archive.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            """INSERT INTO default_sev_intent
+                    (effective_from, bmu_id, revision, state)
+                    VALUES (%s, %s, %s, %s)
+                 RETURNING id""",
+            (default.effective_from, default.bmu_id, default.revision,
+             intents.RECEIVED),
+        ).fetchone()
+
+        for period, volume in default.periods:
+            conn.execute(
+                """INSERT INTO default_sev_period
+                        (default_sev_id, settlement_period, volume_mwh)
+                        VALUES (%s, %s, %s)""",
+                (row[0], period, volume),
+            )
+    return row[0]
+
+
+def _set_default_sev_state(
+    conn: Connection, intent_id: int, state: str,
+    detail: str | None = None, outbound_file_id: int | None = None,
+) -> None:
+    with conn.transaction():
+        conn.execute(
+            """UPDATE default_sev_intent
+                  SET state = %s,
+                      detail = COALESCE(%s, detail),
+                      outbound_file_id = COALESCE(%s, outbound_file_id),
+                      completed_at = CASE WHEN %s THEN now() ELSE completed_at END
+                WHERE id = %s""",
+            (state, detail, outbound_file_id,
+             intents.is_terminal(state), intent_id),
+        )
