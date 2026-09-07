@@ -8,6 +8,17 @@ Five flows that change what we believe about a submission:
     P0283  Delivered rejection    -- the delivered volume failed validation
     P0284  Delivered confirmation -- it passed
 
+VERSIONS. The SVA Data Catalogue index gives 002 for the VTP route on P0283,
+P0284 and P0285; P375 added AMSID Pair fields. We register 002 for P0283,
+because it exists and is what SVAA will send.
+
+P0284002 is NOT in the IDD spreadsheet, though the catalogue index lists it
+for VTP. Either the spreadsheet lags the catalogue or the catalogue entry is
+wrong. We register 001, which is what the generator produced, and this is an
+open question for Elexon: if SVAA sends 002 we will receive a file type we do
+not recognise, acknowledge it as unexpected, and never act on a delivered
+volume confirmation.
+
 One asymmetry shapes this module. P0330 acceptance carries only the BM Unit
 id -- no filename, no sequence number, no effective dates. So a SEV acceptance
 can only be correlated to the most recent outstanding submission for that
@@ -15,16 +26,10 @@ unit. ECVAA's E0281 hands our own filename back; SVAA does not. Where more
 than one submission for a unit is outstanding, correlation is ambiguous and
 the handler raises rather than guessing.
 
-P0329 rejection is the opposite: every field is optional except the reason.
-A rejection may therefore identify the unit, the effective dates and the
-period, or almost nothing. The parser keeps whatever arrived rather than
-requiring a shape the flow does not guarantee.
-
-Versions: P0283 and P0285 have a second version adding AMSID fields for asset
-metering. We are VTP-only and do not hold AMVLP, so version 001 is expected.
-Confirm which version SVAA sends before go-live -- registering a handler
-against the wrong version means the file is received, acknowledged, and never
-acted on.
+P0329 rejection is the opposite: every field is optional except the reason. A
+rejection may identify the unit, the effective dates and the period, or almost
+nothing. The parser keeps whatever arrived rather than requiring a shape the
+flow does not guarantee.
 """
 
 from __future__ import annotations
@@ -40,7 +45,12 @@ from ..idd.file import Node
 SEV_REJECTION_FILE_TYPE = "P0329001"
 SEV_ACCEPTANCE_FILE_TYPE = "P0330001"
 SEV_WARNING_FILE_TYPE = "P0331001"
-DELIVERED_REJECTION_FILE_TYPE = "P0283001"
+
+# 002 per the SVA Data Catalogue index for the VTP route.
+DELIVERED_REJECTION_FILE_TYPE = "P0283002"
+
+# 001 because 002 is not in the IDD spreadsheet. See the module docstring:
+# this is an open question with Elexon.
 DELIVERED_CONFIRMATION_FILE_TYPE = "P0284001"
 
 BSR = "BSR"
@@ -57,6 +67,9 @@ SETTLEMENT_PERIOD = "settlement_period_id"
 GSP_GROUP_ID = "gsp_group_id"
 IMPORT_MSID = "import_msid"
 EXPORT_MSID = "export_msid"
+IMPORT_AMSID = "import_amsid"
+EXPORT_AMSID = "export_amsid"
+MSID_PAIR_INDICATOR = "msid_pair_indicator"
 SEV_FROM = "sev_effective_from_date"
 SEV_TO = "sev_effective_to_date"
 SEV_VOLUME = "submitted_expected_volume"
@@ -88,8 +101,8 @@ class SevAcceptance:
     """An accepted expected volume, identified only by BM Unit.
 
     That is the whole flow: BSA carries bm_unit_id and nothing else. There is
-    no way to tell from the file which submission was accepted, so
-    correlation depends on there being exactly one outstanding.
+    no way to tell from the file which submission was accepted, so correlation
+    depends on there being exactly one outstanding.
     """
 
     bmu_id: str
@@ -111,15 +124,23 @@ class SevWarning:
 
 @dataclass(frozen=True)
 class DeliveredRejection:
-    """One rejected delivered volume. As with P0329, only the reason is
-    mandatory."""
+    """One rejected delivered volume.
+
+    As with P0329, only the reason is mandatory. v002 adds the AMSID fields
+    and the MSID Pair Indicator; we never submit AMSID data, so those arrive
+    empty, but they are kept rather than discarded -- a rejection naming an
+    AMSID we did not send would be worth seeing.
+    """
 
     reason: str
     settlement_date: dt.date | None = None
     gsp_group_id: str | None = None
     bmu_id: str | None = None
+    msid_pair_indicator: str | None = None
     import_msid: int | None = None
     export_msid: int | None = None
+    import_amsid: int | None = None
+    export_amsid: int | None = None
     settlement_period: int | None = None
     volume_mwh: Decimal | None = None
 
@@ -179,14 +200,17 @@ def parse_sev_warnings(body: list[Node]) -> list[SevWarning]:
 def parse_delivered_rejections(body: list[Node]) -> list[DeliveredRejection]:
     return [
         DeliveredRejection(
-            reason=n.values[DELIVERED_REASON],                 # type: ignore[arg-type]
-            settlement_date=n.values.get(SETTLEMENT_DATE),     # type: ignore[arg-type]
-            gsp_group_id=n.values.get(GSP_GROUP_ID),           # type: ignore[arg-type]
-            bmu_id=n.values.get(BMU_ID),                       # type: ignore[arg-type]
-            import_msid=n.values.get(IMPORT_MSID),             # type: ignore[arg-type]
-            export_msid=n.values.get(EXPORT_MSID),             # type: ignore[arg-type]
-            settlement_period=n.values.get(SETTLEMENT_PERIOD), # type: ignore[arg-type]
-            volume_mwh=n.values.get(DELIVERED_VOLUME),         # type: ignore[arg-type]
+            reason=n.values[DELIVERED_REASON],                    # type: ignore[arg-type]
+            settlement_date=n.values.get(SETTLEMENT_DATE),        # type: ignore[arg-type]
+            gsp_group_id=n.values.get(GSP_GROUP_ID),              # type: ignore[arg-type]
+            bmu_id=n.values.get(BMU_ID),                          # type: ignore[arg-type]
+            msid_pair_indicator=n.values.get(MSID_PAIR_INDICATOR),# type: ignore[arg-type]
+            import_msid=n.values.get(IMPORT_MSID),                # type: ignore[arg-type]
+            export_msid=n.values.get(EXPORT_MSID),                # type: ignore[arg-type]
+            import_amsid=n.values.get(IMPORT_AMSID),              # type: ignore[arg-type]
+            export_amsid=n.values.get(EXPORT_AMSID),              # type: ignore[arg-type]
+            settlement_period=n.values.get(SETTLEMENT_PERIOD),    # type: ignore[arg-type]
+            volume_mwh=n.values.get(DELIVERED_VOLUME),            # type: ignore[arg-type]
         )
         for n in body
         if n.record_type == MSR
