@@ -455,8 +455,8 @@ def dr(args: argparse.Namespace) -> int:
     allocate a number already used, and a duplicate cannot be corrected
     retrospectively.
     """
-    dsn = _require("CONSUS_SETTLEMENT_DSN")
-
+    dsn = os.environ.get("CONSUS_DR_DSN") or _require("CONSUS_SETTLEMENT_DSN")
+    log.info("reading %s", "restored instance" if os.environ.get("CONSUS_DR_DSN") else "operational database")
     with db.connect(dsn) as conn:
         log.info("schema version %s",
                  conn.execute("SELECT max(version) FROM schema_migration").fetchone()[0])
