@@ -376,6 +376,112 @@ def _outstanding(conn) -> list[tuple[int, dt.date | None, int | None, str]]:
     ).fetchall()
     return [(r[0], r[1], r[2], r[3]) for r in rows]
 
+def seed(args: argparse.Namespace) -> int:
+    """Create a channel and archive one file, so a recovery test has something
+    real to restore and retrieve.
+
+    Not part of normal operation. Refuses to run against an operational
+    environment: seeding a channel there would create a sender identity nobody
+    decided on.
+    """
+    config = app.Config.from_env()
+    if config.is_operational:
+        raise RuntimeError("seed is for test environments only")
+
+    import datetime as dt_
+    from pathlib import Path as Path_
+
+    from .archive import GcsArchive
+    from .flows.wman import FILE_TYPE as WMAN_TYPE
+    from .flows.wman import ActiveUnit, Wman, to_nodes
+    from .idd import spec
+    from .outbound.sender import Sender
+    from .outbound.transport import (
+        EncryptedTransport, LocalTransport, NullCipher,
+    )
+
+    dsn = _require("CONSUS_SETTLEMENT_DSN")
+
+    with db.connect(dsn) as conn:
+        channel = db.ensure_channel(
+            conn,
+            from_role_code=config.vtp.role,
+            from_participant_id=config.vtp.participant,
+            to_role_code="EC",
+            to_participant_id="UKDC",
+            test_flag=config.test_flag,
+        )
+        log.info("channel %s next_sequence %s", channel.id, channel.next_sequence)
+
+    sender = Sender(
+        connect=lambda: db.connect(dsn),
+        archive=GcsArchive(bucket_name=_require("CONSUS_ARCHIVE_BUCKET")),
+        # Written to the container filesystem and discarded. The archive is
+        # what this seeds; transport is not being tested here.
+        transport=EncryptedTransport(
+            inner=LocalTransport(outbox=Path_("/tmp/out"), inbox=Path_("/tmp/in")),
+            cipher=NullCipher(),
+        ),
+    )
+
+    sent = sender.send(
+        channel=channel,
+        flow=spec.SPEC.flows[WMAN_TYPE],
+        body=to_nodes(Wman(
+            settlement_date=dt_.date(2026, 9, 15),
+            settlement_period=37,
+            units=(ActiveUnit("V__FCNRG001"),),
+        )),
+    )
+
+    log.info("file %s %s sequence %s", sent.file_id, sent.filename, sent.sequence_number)
+    log.info("archived at %s", sent.gcs_uri)
+    return 0
+
+
+def dr(args: argparse.Namespace) -> int:
+    """Read-only checks for the disaster recovery test.
+
+    Runs inside the VPC because the database has no public address -- which is
+    the point, and is why a recovery cannot be performed from a laptop.
+
+    Prints the three facts a restore is verified against: schema version,
+    record counts, and sequence position per channel. The last matters most: a
+    restored database whose counter is behind what was actually sent would
+    allocate a number already used, and a duplicate cannot be corrected
+    retrospectively.
+    """
+    dsn = _require("CONSUS_SETTLEMENT_DSN")
+
+    with db.connect(dsn) as conn:
+        log.info("schema version %s",
+                 conn.execute("SELECT max(version) FROM schema_migration").fetchone()[0])
+        log.info("outbound files %s, archived %s",
+                 conn.execute("SELECT count(*) FROM outbound_file").fetchone()[0],
+                 conn.execute("SELECT count(*) FROM outbound_file WHERE gcs_uri IS NOT NULL").fetchone()[0])
+
+        for r in conn.execute(
+            "SELECT id, from_role_code, from_participant_id, test_flag, next_sequence "
+            "FROM channel ORDER BY id"
+        ).fetchall():
+            log.info("channel %s %s/%s flag=%s next_sequence=%s",
+                     r[0], r[1], r[2], r[3] or "(oper)", r[4])
+
+        for r in conn.execute(
+            "SELECT channel_id, max(sequence_number) FROM outbound_file "
+            "GROUP BY channel_id ORDER BY channel_id"
+        ).fetchall():
+            log.info("channel %s highest sequence sent %s", r[0], r[1])
+
+        for r in conn.execute(
+            "SELECT id, filename, checksum, record_count, gcs_uri FROM outbound_file "
+            "WHERE gcs_uri IS NOT NULL ORDER BY id DESC LIMIT 3"
+        ).fetchall():
+            log.info("file %s %s checksum=%s records=%s", r[0], r[1], r[2], r[3])
+            log.info("      %s", r[4])
+
+    return 0
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="consus-settlement")
@@ -421,6 +527,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("collect", help="pull, parse and acknowledge waiting files")
 
+    sub.add_parser("seed", help="create a channel and archive one file, test environments only")
+    sub.add_parser("dr", help="read-only checks for the disaster recovery test")
+
     sweep_parser = sub.add_parser("sweep", help="report outstanding submissions")
     sweep_parser.add_argument(
         "--grace",
@@ -445,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
         "sweep": sweep,
         "submit": submit,
         "reconcile": reconcile,
+        "seed": seed,
+        "dr": dr,
     }
     return commands[args.command](args)
 
