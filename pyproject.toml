@@ -4,6 +4,12 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.3.4",
+    # The archive imports these lazily so unit tests need no GCS credentials.
+    # That lazy import is why their absence was invisible until a deployed
+    # container tried to write its first file.
+    "google-cloud-storage>=2.18",
+    "flask>=3.0",
+    "gunicorn>=23.0",
 ]
 
 [project.optional-dependencies]
