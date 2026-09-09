@@ -19,6 +19,10 @@ artifacts = ["*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "volume: capacity tests at portfolio scale. Minutes, not seconds. Excluded from the default run.",
+]
+addopts = "-m 'not volume'"
 
 [dependency-groups]
 dev = [
@@ -32,3 +36,5 @@ dev = [
 
 [project.scripts]
 consus-settlement = "consus_elexon_settlement.cli:main"
+
+
