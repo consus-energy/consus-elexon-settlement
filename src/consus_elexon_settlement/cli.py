@@ -411,8 +411,12 @@ def seed(args: argparse.Namespace) -> int:
             to_participant_id="UKDC",
             test_flag=config.test_flag,
         )
-        log.info("channel %s next_sequence %s", channel.id, channel.next_sequence)
-
+        log.info("channel %s %s/%s -> %s/%s flag=%s",
+                 channel.id,
+                 channel.from_role_code, channel.from_participant_id,
+                 channel.to_role_code, channel.to_participant_id,
+                 channel.test_flag or "(operational)")
+        
     sender = Sender(
         connect=lambda: db.connect(dsn),
         archive=GcsArchive(bucket_name=_require("CONSUS_ARCHIVE_BUCKET")),
