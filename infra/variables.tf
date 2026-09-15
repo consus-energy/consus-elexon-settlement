@@ -34,7 +34,7 @@ variable "archive_retention_days" {
     and lock the bucket before go-live.
   EOT
   type        = number
-  default     = null
+  default     = 1220
 }
 
 variable "archive_retention_locked" {
