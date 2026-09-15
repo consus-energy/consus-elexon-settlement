@@ -1,0 +1,26 @@
+# Example environment configuration.
+#
+# The real file is gitignored because it carries the project id. This example
+# is committed so that a rebuild from a fresh checkout can proceed: disaster
+# recovery testing found that infrastructure as code covered the
+# infrastructure but not the configuration needed to apply it.
+#
+# The same values are held in the password manager alongside the manual
+# fallback credentials, so they are reachable when Consus systems are not.
+
+project_id = "REPLACE_ME"
+env        = "test"
+
+vtp_participant_id   = "CNRGVTP1"   # placeholder; Party Id not yet issued
+ecvna_participant_id = "CONSUSEN"
+
+settlement_environment = "TST1"
+
+svaa_role_code      = "G"
+svaa_participant_id = "UKDC"        # unconfirmed, open with Elexon
+
+alert_emails           = ["REPLACE_ME"]
+absence_alerts_enabled = false      # schedulers paused pending FTP
+
+archive_retention_days   = 1220
+archive_retention_locked = false    # locked before go live

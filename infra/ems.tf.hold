@@ -1,5 +1,14 @@
-# The EMS boundary: a Pub/Sub topic, a push subscription, and the Cloud Run
-# service it pushes to.
+# The EMS boundary, part two: the push subscription and the Cloud Run service
+# it pushes to.
+#
+# The topic itself, the publisher grant and the pubsub API now live in
+# ems_topic.tf, which is applied. This file holds everything BEHIND the topic,
+# so that the bridge can be stood up without a secret, an image or an FTP
+# endpoint being ready.
+#
+# UNHOLDING THIS FILE: delete google_pubsub_subscription.bridge_test from
+# ems_topic.tf in the same change. Two subscriptions on one topic means every
+# intent is delivered twice, and the pull copy has nobody to read it.
 #
 # The EMS publishes decisions as facts -- what it expects, what it traded,
 # what it delivered -- and knows nothing else about settlement. It has publish
@@ -14,11 +23,6 @@
 # request is slow, but the volume is low and the alternative -- accept, ack,
 # process later -- makes a failure after the ack invisible to the EMS.
 
-resource "google_project_service" "pubsub" {
-  project            = var.project_id
-  service            = "pubsub.googleapis.com"
-  disable_on_destroy = false
-}
 
 # --- the service ------------------------------------------------------------
 
@@ -196,20 +200,7 @@ resource "google_cloud_run_v2_service" "ems" {
   ]
 }
 
-# --- the topic --------------------------------------------------------------
-
-resource "google_pubsub_topic" "intents" {
-  name = "${local.prefix}-intents"
-
-  # Long enough to replay a day's decisions if the subscription is
-  # misconfigured and messages are acked without being acted on. Shorter than
-  # the archive retention, because these are instructions rather than the
-  # settlement record -- BSC Section U1.6 applies to files, not to what
-  # prompted them.
-  message_retention_duration = "86400s"
-
-  depends_on = [google_project_service.pubsub]
-}
+# --- dead letter ------------------------------------------------------------
 
 resource "google_pubsub_topic" "dead_letter" {
   name = "${local.prefix}-intents-dead-letter"
@@ -296,15 +287,6 @@ resource "google_pubsub_subscription_iam_member" "dead_letter_subscriber" {
   member       = "serviceAccount:service-${data.google_project.this.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
-# Whoever publishes. The EMS runs in its own project, so this is a
-# cross-project grant and the only access it has here.
-resource "google_pubsub_topic_iam_member" "publishers" {
-  for_each = toset(var.ems_publishers)
-
-  topic  = google_pubsub_topic.intents.name
-  role   = "roles/pubsub.publisher"
-  member = each.key
-}
 
 data "google_project" "this" {
   project_id = var.project_id

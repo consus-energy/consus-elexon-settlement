@@ -164,3 +164,12 @@ variable "ems_publishers" {
   type    = list(string)
   default = []
 }
+
+variable "ems_bridge_test_subscription" {
+  description = <<-EOT
+    Create a pull subscription so published intents can be read back before
+    the push subscription exists. Set false once ems.tf.hold is unheld.
+  EOT
+  type    = bool
+  default = false
+}
