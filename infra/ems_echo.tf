@@ -100,10 +100,16 @@ resource "google_cloud_run_v2_service" "ems_echo" {
       # start degraded -- unlike endpoint.py, where any of nine missing
       # variables stops it dead.
 
+      # 512Mi, matching the real endpoint in ems.tf.hold. Not a guess at what
+      # gunicorn needs -- Cloud Run REFUSES less than 512Mi when the CPU is
+      # always allocated, which it is by default on a v2 service, and 256Mi
+      # failed the apply with exactly that error. Parsing a 50-period profile
+      # needs a fraction of it; matching the real endpoint costs nothing and
+      # removes a difference nobody would remember was deliberate.
       resources {
         limits = {
           cpu    = "1"
-          memory = "256Mi"
+          memory = "512Mi"
         }
       }
 
