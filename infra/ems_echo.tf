@@ -168,7 +168,16 @@ resource "google_pubsub_subscription" "echo" {
   topic = google_pubsub_topic.intents.name
 
   push_config {
-    push_endpoint = google_cloud_run_v2_service.ems_echo[0].uri
+    # THE PATH MATTERS. `.uri` is the service root and the route is /intent, so
+    # without it every push is a 404 -- which Pub/Sub treats as a failure and
+    # retries, so the symptom is not "nothing arrives" but a flood of retries
+    # and, on a subscription with one, a dead letter queue full of intents.
+    # Measured: the first real publish produced `POST / HTTP/1.1" 404` twice a
+    # second until the message expired.
+    #
+    # The AUDIENCE stays the bare URI. It is the OIDC audience Cloud Run
+    # validates the token against, which is the service, not the route.
+    push_endpoint = "${google_cloud_run_v2_service.ems_echo[0].uri}/intent"
 
     oidc_token {
       service_account_email = google_service_account.echo_push[0].email

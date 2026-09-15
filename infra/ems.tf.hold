@@ -217,7 +217,13 @@ resource "google_pubsub_subscription" "intents" {
   topic = google_pubsub_topic.intents.name
 
   push_config {
-    push_endpoint = google_cloud_run_v2_service.ems.uri
+    # /intent, not the service root. `endpoint.py` routes POST /intent and
+    # returns 404 for anything else; a 404 is non-2xx, so Pub/Sub retries it
+    # five times and dead-letters the message. Every intent would have taken
+    # that path. Found on the echo endpoint, which carried the same line, when
+    # the first real message produced `POST / HTTP/1.1" 404` -- which is the
+    # whole reason the echo was stood up before this file was unheld.
+    push_endpoint = "${google_cloud_run_v2_service.ems.uri}/intent"
 
     # Pub/Sub signs the request with this identity, and Cloud Run rejects
     # anything not carrying a valid token from a principal holding
