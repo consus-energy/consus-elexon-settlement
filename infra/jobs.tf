@@ -234,6 +234,17 @@ resource "google_cloud_run_v2_job" "gateway" {
     # a string, not a grant.
     google_secret_manager_secret_iam_member.gateway_gpg,
   ]
+
+  lifecycle {
+    # The build pipeline deploys by commit hash, which is more precise than
+    # the tag held in var.image_tag. Terraform manages the shape of the job;
+    # the pipeline manages which build is in it.
+    #
+    # Without this, every plan reports a difference on all three jobs, and a
+    # difference that appears every time is one that stops being read. Found
+    # during disaster recovery testing, recorded as observation O03.
+    ignore_changes = [template[0].template[0].containers[0].image]
+  }
 }
 
 # --- schedules --------------------------------------------------------------
