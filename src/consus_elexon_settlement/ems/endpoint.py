@@ -45,6 +45,7 @@ from .. import app as gateway_app
 from .. import db, service
 from ..archive import GcsArchive
 from ..app import build_cipher, read_secret_file, require_env as _require
+from ..logging_config import configure_logging
 
 from . import messages
 from ..outbound.ftp import FtpTransport
@@ -63,6 +64,7 @@ def create_app() -> Flask:
     every message would add a database round trip to a path measured against
     Gate Closure.
     """
+    configure_logging()
     flask_app = Flask(__name__)
     config = gateway_app.Config.from_env()
     dsn = _require("CONSUS_SETTLEMENT_DSN")

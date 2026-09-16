@@ -38,6 +38,7 @@ import logging
 
 from flask import Flask, jsonify, request
 
+from ..logging_config import configure_logging
 from . import messages
 
 log = logging.getLogger("consus.settlement.ems.echo")
@@ -88,6 +89,7 @@ def create_app() -> Flask:
     nothing, so there is no deployment in which it starts degraded and no
     variable whose absence changes what it does.
     """
+    configure_logging()
     app = Flask(__name__)
 
     @app.post("/intent")
