@@ -37,9 +37,11 @@ produces a P0285 exception.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from .. import db
+from ..ems import flow_events
 from ..flows import delivered as delivered_flow
 from ..flows import ecvn as ecvn_flow
 from ..flows import sev as sev_flow
@@ -47,6 +49,8 @@ from ..flows import wman as wman_flow
 from ..idd import spec, spec_svaa
 from ..idd.model import Flow
 from .sender import Sender, Sent
+
+log = logging.getLogger("consus.settlement.submissions")
 
 
 class Submitter:
@@ -57,9 +61,13 @@ class Submitter:
     open across hours is a connection that will be dead at Gate Closure.
     """
 
-    def __init__(self, connect, sender: Sender) -> None:
+    def __init__(self, connect, sender: Sender, flow_publisher=None) -> None:
         self._connect = connect
         self._sender = sender
+        #: Optional. None is the normal state until the EMS return topic is
+        #: stood up, and a service that refused to start without it would be
+        #: unstartable today. See `ems.flow_publisher.FlowPublisher.from_env`.
+        self._flow_publisher = flow_publisher
 
     # --- ECVAA -------------------------------------------------------------
 
@@ -86,7 +94,9 @@ class Submitter:
                      notification.settlement_period, unit.bmu_id, unit.active),
                 )
 
-        return self._mark(sent, "wman")
+        marked = self._mark(sent, "wman")
+        self._tell_ems(marked, notification)
+        return marked
 
     def ecvn(
         self, channel: db.Channel, notification: ecvn_flow.Ecvn, ecvnaa_key: str
@@ -231,6 +241,71 @@ class Submitter:
             with self._connect() as conn:
                 db.submit_items(conn, table, sent.file_id)
         return sent
+
+    def _tell_ems(self, sent: Sent, notification: wman_flow.Wman) -> None:
+        """Publish one `submitted` flow event per BM Unit in a sent WMAN.
+
+        WHY THE EMS NEEDS THIS AT ALL. Its dispatch gate refuses to move a
+        battery on a period it cannot show was notified -- and without a
+        return channel it could only read its OWN published intent, which
+        records what it asked for rather than what we did. Deviation Volume
+        is calculated only for a period with a BOA or a WMAN (BSC Section T
+        4.3.AA.1), so a battery moved on an unnotified period deviates against
+        nothing and whatever trade it was delivering settles unhedged.
+
+        ONE FILE IS MANY EVENTS. The gate is per BM Unit per period, so a
+        notification naming four units produces four messages.
+
+        NOTHING IS PUBLISHED FOR A FILE THAT DID NOT LAND. `sent.delivered`
+        false means the bytes are archived and transport failed; the items are
+        still PENDING and `Sender.retry` will resend them. Telling the EMS we
+        notified ECVAA at that point would open its gate on a notification
+        nobody has received.
+
+        THE TIMESTAMP IS OUR HANDOVER, AND THE MESSAGE SAYS SO. We do not know
+        when ECVAA received the file -- that arrives later in an ADT, on an
+        inbound path not yet wired to the router -- so the basis is `sent`,
+        which the EMS treats as a LOWER BOUND: enough to prove lateness, not
+        enough to prove punctuality. See `ems.flow_events`.
+
+        BEST EFFORT, NEVER RAISING. The file is sent and the rows are
+        SUBMITTED; that record matters more than this message. A missing flow
+        event fails SAFE at the far end, because no evidence means no dispatch.
+        """
+        if self._flow_publisher is None or not sent.delivered:
+            return
+        with self._connect() as conn:
+            handed_over = db.sent_at(conn, sent.file_id)
+        if handed_over is None:
+            # DELIVERED WITH NO SEND TIME IS A CONTRADICTION, and substituting
+            # `now()` would put a timestamp minutes late into a Gate Closure
+            # comparison. Report it and send nothing.
+            log.error(
+                "flow_event.no_send_time",
+                extra={"file_id": sent.file_id, "filename": sent.filename},
+            )
+            return
+        messages = [
+            flow_events.submitted_event(
+                flow=flow_events.WMAN,
+                bmu_id=unit.bmu_id,
+                settlement_date=notification.settlement_date,
+                settlement_period=notification.settlement_period,
+                occurred_at=handed_over,
+                basis=flow_events.BASIS_SENT,
+            )
+            for unit in notification.units
+        ]
+        published = self._flow_publisher.publish_all(messages)
+        if published != len(messages):
+            log.warning(
+                "flow_event.partial_publish",
+                extra={
+                    "file_id": sent.file_id,
+                    "published": published,
+                    "expected": len(messages),
+                },
+            )
 
 
 def _flow(spec_module, file_type: str) -> Flow:

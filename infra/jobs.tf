@@ -63,6 +63,11 @@ locals {
     { name = "CONSUS_ECVNA_PARTICIPANT", value = var.ecvna_participant_id },
     { name = "CONSUS_ARCHIVE_BUCKET", value = google_storage_bucket.archive.name },
     { name = "CONSUS_LOG_LEVEL", value = var.log_level },
+    # The return channel to the EMS. Empty disables it -- see
+    # ems_flow_topic.tf. It is in the SHARED job env rather than on one job
+    # because both halves of the channel are jobs: `collect` routes the E0521
+    # that rejects a WMAN, and whatever sends one publishes the submission.
+    { name = "CONSUS_EMS_FLOW_TOPIC", value = var.ems_flow_topic },
   ]
 
   # Jobs that run on a schedule. migrate is excluded deliberately: a schema

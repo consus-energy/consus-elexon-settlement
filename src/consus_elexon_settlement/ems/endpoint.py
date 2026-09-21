@@ -48,6 +48,7 @@ from ..app import build_cipher, read_secret_file, require_env as _require
 from ..logging_config import configure_logging
 
 from . import messages
+from .flow_publisher import TOPIC_ENV as FLOW_TOPIC_ENV, FlowPublisher
 from ..outbound.ftp import FtpTransport
 from ..outbound.sender import Sender
 from ..outbound.submissions import Submitter
@@ -78,7 +79,19 @@ def create_app() -> Flask:
         archive=GcsArchive(bucket_name=_require("CONSUS_ARCHIVE_BUCKET")),
         transport=transport,
     )
-    submitter = Submitter(connect=connect, sender=sender)
+    # THE RETURN CHANNEL. None when CONSUS_EMS_FLOW_TOPIC is unset, which is
+    # the ordinary state until the EMS stands its topic up — and is logged
+    # ONCE, here, rather than as an error per event, which is how a real
+    # failure gets lost among expected ones.
+    flow_publisher = FlowPublisher.from_env()
+    if flow_publisher is None:
+        log.warning(
+            "flow_event.channel_disabled: %s is unset, so the EMS will be told "
+            "nothing about what happens to a flow. Its dispatch gate fails safe "
+            "without them — no evidence means no dispatch.",
+            FLOW_TOPIC_ENV,
+        )
+    submitter = Submitter(connect=connect, sender=sender, flow_publisher=flow_publisher)
 
     with connect() as conn:
         channels = service.Channels(

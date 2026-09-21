@@ -286,14 +286,16 @@ def test_wman_rejection_at_period_and_unit_level(conn, channel):
     db.record_sent(conn, file_id)
     db.submit_items(conn, "wman", file_id)
 
-    # One unit named: only that unit is rejected.
+    # One unit named: only that unit is rejected. THE IDS COME BACK, not a
+    # count -- the EMS gate is per BM Unit per period, so a period-level
+    # exception has to say which units it just took out.
     assert db.reject_wman(
         conn, dt.date(2026, 9, 1), 37, "BM Unit not baselined",
         bmu_id="2__ABCDE001",
-    ) == 1
+    ) == ["2__ABCDE001"]
 
     # No unit named: everything still submitted in the period goes.
-    assert db.reject_wman(conn, dt.date(2026, 9, 1), 37, "period rejected") == 1
+    assert db.reject_wman(conn, dt.date(2026, 9, 1), 37, "period rejected") == ["2__ABCDE002"]
 # --- helpers ----------------------------------------------------------------
 
 def _state(conn, entity_id: int, table: str = "outbound_file") -> str:

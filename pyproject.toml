@@ -8,6 +8,13 @@ dependencies = [
     # That lazy import is why their absence was invisible until a deployed
     # container tried to write its first file.
     "google-cloud-storage>=2.18",
+    # The return channel to the EMS. Imported lazily by
+    # `ems.flow_publisher.FlowPublisher.from_env`, for the same reason the
+    # archive imports GCS lazily — a unit test of the message contract should
+    # need neither the package nor credentials. That laziness is also why its
+    # absence would stay invisible until a deployed container published its
+    # first flow event, which is what the storage comment above is about.
+    "google-cloud-pubsub>=2.21",
     "flask>=3.0",
     "gunicorn>=23.0",
 ]

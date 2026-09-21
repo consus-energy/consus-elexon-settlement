@@ -44,6 +44,7 @@ import logging
 from psycopg import Connection
 
 from .. import db, service, states
+from ..ems import flow_events
 from ..idd.file import Header, Node
 from . import ecvaa, svaa
 
@@ -92,8 +93,11 @@ class EcvaaHandlers:
     record why it failed will want it.
     """
 
-    def __init__(self, connect) -> None:
+    def __init__(self, connect, flow_publisher=None) -> None:
         self._connect = connect
+        #: Optional. None until the EMS return topic is stood up, which is the
+        #: normal state — see `ems.flow_publisher.FlowPublisher.from_env`.
+        self._flow_publisher = flow_publisher
 
     # --- E0281 acceptance ---------------------------------------------------
 
@@ -201,6 +205,7 @@ class EcvaaHandlers:
                             f"{exception.settlement_date} period "
                             f"{exception.settlement_period}, which we have no record of"
                         )
+                    self._tell_ems_rejected(exception, header, rejected, unit.reason)
                 _reconcile_wman(conn, exception)
                 return
 
@@ -215,7 +220,79 @@ class EcvaaHandlers:
                     f"{filename}: WMAN rejection for {exception.settlement_date} "
                     f"period {exception.settlement_period}, which we have no record of"
                 )
+            self._tell_ems_rejected(
+                exception, header, rejected, exception.reason or "rejected, no reason given"
+            )
             _reconcile_wman(conn, exception)
+
+    def _tell_ems_rejected(
+        self,
+        exception: ecvaa.WmanException,
+        header: Header,
+        bmu_ids: list[str],
+        reason: str,
+    ) -> None:
+        """Tell the EMS which BM Units just lost this period.
+
+        THE MOST URGENT MESSAGE THIS CHANNEL CARRIES. A rejected WMAN means
+        SVAA never learns we were active, so no Deviation Volume is calculated
+        for the period at all (BSC Section T 4.3.AA.1) -- whatever the ECVN
+        says. A battery that keeps delivering into it moves for nothing and the
+        trade behind it settles unhedged. The EMS gate closes on this, and
+        until now it had no way to know.
+
+        ONE MESSAGE PER BM UNIT, because that is the grain of the gate. A
+        period-level exception names no units at all, which is why
+        `db.reject_wman` returns the ids it changed rather than a count.
+
+        `header.creation_time` IS ECVAA's CLOCK, which is what a rejection's
+        timestamp has to be: they made the decision and the time is theirs.
+        Unlike a submission, there is no `sent` reading of this, and
+        `flow_events.rejected_event` takes no basis for that reason.
+
+        THE CODE IS THE FILE TYPE BECAUSE E0521 HAS NO FINER ONE. Unlike E0091,
+        which carries a structured reason per period, a WMAN exception gives
+        only 80 characters of free text (N0187). So `rejection_code` is
+        `E0521001` -- "a WMAN exception report said so" -- and the text goes in
+        `rejection_detail` verbatim. Inventing a code out of the text would be
+        a vocabulary of ours that nobody else uses and that drifts the first
+        time ECVAA rewords a message.
+
+        BEST EFFORT, LIKE THE INTENT CALLBACK ABOVE. The rejection is recorded;
+        that is the settlement fact and it matters more. A flow event that does
+        not arrive fails SAFE at the far end -- no evidence means no dispatch.
+        """
+        if self._flow_publisher is None or not bmu_ids:
+            return
+        try:
+            messages = [
+                flow_events.rejected_event(
+                    flow=flow_events.WMAN,
+                    bmu_id=bmu_id,
+                    settlement_date=exception.settlement_date,
+                    settlement_period=exception.settlement_period,
+                    occurred_at=header.creation_time,
+                    rejection_code=header.file_type,
+                    rejection_detail=reason,
+                )
+                for bmu_id in bmu_ids
+            ]
+            published = self._flow_publisher.publish_all(messages)
+        except Exception:
+            log.exception(
+                "flow_event.rejection_publish_failed",
+                extra={
+                    "settlement_date": exception.settlement_date.isoformat(),
+                    "settlement_period": exception.settlement_period,
+                    "bmu_ids": bmu_ids,
+                },
+            )
+            return
+        if published != len(messages):
+            log.warning(
+                "flow_event.partial_publish",
+                extra={"published": published, "expected": len(messages)},
+            )
 
 
 def _find_notification(
