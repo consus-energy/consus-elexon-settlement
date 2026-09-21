@@ -172,6 +172,7 @@ def build(
     archive: Archive,
     transport: Transport,
     store_key=None,
+    flow_publisher=None,
 ) -> Gateway:
     """Everything wired. The one call a process makes at startup.
 
@@ -188,12 +189,19 @@ def build(
     reference. It defaults to a function that refuses, so a deployment which
     forgets to supply one fails at the moment the key arrives rather than
     discarding it silently and leaving us unable to submit ECVNs.
+
+    `flow_publisher` tells the EMS what happened to a flow -- that a WMAN was
+    sent, that ECVAA threw one back. None is the ORDINARY state, not a
+    degraded one: the return topic does not exist until the EMS side stands it
+    up, and the gateway's own work does not depend on it. It is passed in for
+    the same reason the archive and transport are -- whoever starts the
+    process chooses, and this function does not branch on environment.
     """
 
     def connect():
         return db.connect(dsn)
 
-    ecvaa_handlers = EcvaaHandlers(connect=connect)
+    ecvaa_handlers = EcvaaHandlers(connect=connect, flow_publisher=flow_publisher)
     svaa_handlers = SvaaHandlers(connect=connect)
 
     handlers = Handlers(
@@ -222,7 +230,7 @@ def build(
             response_name=response_filename,
         ),
         sender=sender,
-        submitter=Submitter(connect=connect, sender=sender),
+        submitter=Submitter(connect=connect, sender=sender, flow_publisher=flow_publisher),
     )
 
 

@@ -45,6 +45,7 @@ from .outbound.transport import (
     Transport,
 )
 
+from .ems.flow_publisher import TOPIC_ENV as FLOW_TOPIC_ENV, FlowPublisher
 from .outbound.ftp import FtpTransport
 
 log = logging.getLogger("consus.settlement")
@@ -61,12 +62,26 @@ def bootstrap() -> tuple[app.Gateway, app.Config, str]:
     config = app.Config.from_env()
     dsn = _require("CONSUS_SETTLEMENT_DSN")
 
+    # THE RETURN CHANNEL TO THE EMS. None when CONSUS_EMS_FLOW_TOPIC is unset,
+    # which is the ordinary state until the EMS stands its topic up. Said ONCE
+    # here rather than as an error per event — an expected condition reported
+    # repeatedly is how a real failure gets lost.
+    flow_publisher = FlowPublisher.from_env()
+    if flow_publisher is None:
+        log.warning(
+            "flow_event.channel_disabled: %s is unset, so the EMS is told "
+            "nothing about what happens to a flow. Its dispatch gate fails "
+            "safe without them — no evidence means no dispatch.",
+            FLOW_TOPIC_ENV,
+        )
+
     return app.build(
         config=config,
         dsn=dsn,
         archive=_archive(),
         transport=_transport(),
         store_key=_key_store(),
+        flow_publisher=flow_publisher,
     ), config, dsn
 
 

@@ -59,7 +59,7 @@ class FailingTransport:
         return []
 
 
-def build_submitter(conn, tmp_path: Path, transport) -> Submitter:
+def build_submitter(conn, tmp_path: Path, transport, flow_publisher=None) -> Submitter:
     """A submitter over the test connection.
 
     The connection factory returns the same connection every time rather than
@@ -72,7 +72,9 @@ def build_submitter(conn, tmp_path: Path, transport) -> Submitter:
         archive=LocalArchive(root=tmp_path / "archive"),
         transport=transport,
     )
-    return Submitter(connect=lambda: _NoClose(conn), sender=sender)
+    return Submitter(
+        connect=lambda: _NoClose(conn), sender=sender, flow_publisher=flow_publisher
+    )
 
 
 class _NoClose:
@@ -97,16 +99,45 @@ class _NoClose:
         return getattr(self._conn, name)
 
 
+class RecordingPublisher:
+    """A flow publisher that keeps the messages instead of sending them.
+
+    RECORDS THE WHOLE MESSAGE, not a count. The fields are a cross-repo
+    contract — the consumer is `vtp/return_channel.py` in consus-prod — so a
+    fake that kept only "two published" could not catch the one failure that
+    matters: a well-formed-looking message the far side refuses and ACKS, in
+    its own logs, with nothing coming back.
+    """
+
+    def __init__(self, fail: bool = False) -> None:
+        self.messages: list[dict] = []
+        self._fail = fail
+
+    def publish(self, message: dict) -> bool:
+        self.messages.append(message)
+        return not self._fail
+
+    def publish_all(self, messages: list[dict]) -> int:
+        return sum(1 for m in messages if self.publish(m))
+
+
 @pytest.fixture
-def submitter(conn, tmp_path: Path) -> Submitter:
+def flow_publisher() -> RecordingPublisher:
+    return RecordingPublisher()
+
+
+@pytest.fixture
+def submitter(conn, tmp_path: Path, flow_publisher) -> Submitter:
     return build_submitter(conn, tmp_path, LocalTransport(
         outbox=tmp_path / "out", inbox=tmp_path / "in",
-    ))
+    ), flow_publisher=flow_publisher)
 
 
 @pytest.fixture
-def failing_submitter(conn, tmp_path: Path) -> Submitter:
-    return build_submitter(conn, tmp_path, FailingTransport())
+def failing_submitter(conn, tmp_path: Path, flow_publisher) -> Submitter:
+    return build_submitter(
+        conn, tmp_path, FailingTransport(), flow_publisher=flow_publisher
+    )
 
 
 @pytest.fixture
@@ -435,3 +466,92 @@ def test_deviation_of_a_turn_up_is_negative():
 
 def test_deviation_of_no_action_is_zero():
     assert deviation(Decimal("-0.1200"), Decimal("-0.1200")) == Decimal("0")
+
+# --------------------------------------------- the return channel (S-13b)
+
+
+def test_a_sent_wman_tells_the_ems_once_per_bm_unit(submitter, ecvaa, flow_publisher):
+    """THE GAP THIS CLOSES. The EMS dispatch gate refuses to move a battery on
+    a period it cannot show was notified, and without this it could only read
+    its OWN published intent — a record of what it asked for, not of what we
+    did.
+
+    ONE MESSAGE PER BM UNIT because the gate is per BM Unit per period.
+    """
+    sent = submitter.wman(ecvaa, Wman(DATE, PERIOD, (
+        ActiveUnit("V__ACNRG001"), ActiveUnit("V__ACNRG002"),
+    )))
+    assert sent.delivered
+
+    assert [m["bmu_id"] for m in flow_publisher.messages] == [
+        "V__ACNRG001", "V__ACNRG002",
+    ]
+    message = flow_publisher.messages[0]
+    assert message["kind"] == "flow_event"
+    assert message["flow"] == "wman"
+    assert message["event"] == "submitted"
+    assert message["settlement_date"] == DATE.isoformat()
+    assert message["settlement_period"] == PERIOD
+
+
+def test_the_timestamp_is_our_handover_and_the_message_says_so(
+    submitter, ecvaa, flow_publisher, conn
+):
+    """WE DO NOT KNOW WHEN ECVAA RECEIVED IT. That arrives later in an ADT, on
+    an inbound path not wired to the router. So the basis is `sent` — a LOWER
+    BOUND the EMS can use to prove lateness and not punctuality — and the
+    timestamp is the file row's, read back rather than a `now()` of our own
+    that would drift from it by seconds."""
+    sent = submitter.wman(ecvaa, Wman(DATE, PERIOD, (ActiveUnit("V__ACNRG001"),)))
+
+    (message,) = flow_publisher.messages
+    assert message["occurred_at_basis"] == "sent"
+    assert message["occurred_at"] == db.sent_at(conn, sent.file_id).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def test_a_wman_that_failed_transport_tells_the_ems_NOTHING(
+    failing_submitter, ecvaa, flow_publisher
+):
+    """THE ONE THAT WOULD BE SILENTLY WRONG. The bytes are archived, the rows
+    are still PENDING and `Sender.retry` will resend them. Telling the EMS we
+    notified ECVAA at this point would open its gate on a notification nobody
+    has received — a battery moving against a deviation that will never be
+    measured."""
+    sent = failing_submitter.wman(ecvaa, Wman(DATE, PERIOD, (ActiveUnit("V__ACNRG001"),)))
+
+    assert not sent.delivered
+    assert flow_publisher.messages == []
+
+
+def test_a_submitter_with_no_publisher_still_submits(conn, tmp_path, ecvaa):
+    """None is the ORDINARY state, not a degraded one: the EMS return topic
+    does not exist until that side stands it up, and the gateway's own work
+    does not depend on it."""
+    plain = build_submitter(conn, tmp_path, LocalTransport(
+        outbox=tmp_path / "out2", inbox=tmp_path / "in2",
+    ))
+
+    sent = plain.wman(ecvaa, Wman(DATE, PERIOD, (ActiveUnit("V__ACNRG001"),)))
+
+    assert sent.delivered
+
+
+def test_a_publish_failure_does_not_lose_the_submission(conn, tmp_path, ecvaa):
+    """BEST EFFORT, AND THE ORDER OF IMPORTANCE IS STATED. The file is sent and
+    the rows are SUBMITTED; that record is the settlement fact. A flow event
+    that never arrives fails SAFE at the far end — no evidence means no
+    dispatch."""
+    failing = RecordingPublisher(fail=True)
+    plain = build_submitter(conn, tmp_path, LocalTransport(
+        outbox=tmp_path / "out3", inbox=tmp_path / "in3",
+    ), flow_publisher=failing)
+
+    sent = plain.wman(ecvaa, Wman(DATE, PERIOD, (ActiveUnit("V__ACNRG001"),)))
+
+    assert sent.delivered
+    rows = conn.execute(
+        "SELECT state FROM wman WHERE outbound_file_id = %s", (sent.file_id,)
+    ).fetchall()
+    assert rows == [(states.SUBMITTED,)]

@@ -361,19 +361,25 @@ def reject_wman(
     settlement_period: int,
     reason: str,
     bmu_id: str | None = None,
-) -> int:
-    """Reject wholesale market activity rows. Returns the number affected.
+) -> list[str]:
+    """Reject wholesale market activity rows. Returns the BM Units affected.
 
     `bmu_id` None rejects every unit still submitted in that period, which is
     what a period-level exception means. Units already rejected individually
     are left alone -- the WHERE clause on SUBMITTED handles that.
+
+    THE IDS RATHER THAN A COUNT, because a period-level exception names no
+    units and the caller has to tell the EMS which BM Units it just lost. Its
+    dispatch gate is per BM Unit per period, so "three rows changed" is not
+    something it can act on. A count is also still available as `len()`.
     """
     with conn.transaction():
         if bmu_id is None:
             cur = conn.execute(
                 """UPDATE wman SET state = %s, rejection_reason = %s
                     WHERE settlement_date = %s AND settlement_period = %s
-                      AND state = %s""",
+                      AND state = %s
+                RETURNING bmu_id""",
                 (states.REJECTED, reason[:80], settlement_date,
                  settlement_period, states.SUBMITTED),
             )
@@ -381,11 +387,30 @@ def reject_wman(
             cur = conn.execute(
                 """UPDATE wman SET state = %s, rejection_reason = %s
                     WHERE settlement_date = %s AND settlement_period = %s
-                      AND bmu_id = %s AND state = %s""",
+                      AND bmu_id = %s AND state = %s
+                RETURNING bmu_id""",
                 (states.REJECTED, reason[:80], settlement_date,
                  settlement_period, bmu_id, states.SUBMITTED),
             )
-        return cur.rowcount
+        return [row[0] for row in cur.fetchall()]
+
+
+def sent_at(conn: Connection, file_id: int) -> dt.datetime | None:
+    """When the file was handed to transport, or None if it never was.
+
+    READ BACK RATHER THAN PASSED AROUND. `mark_sent` is what stamps it, and a
+    caller that carried its own `now()` alongside would eventually disagree
+    with the row by a few seconds -- which is exactly the size of error that
+    matters when the number is compared against Gate Closure.
+
+    None is a real answer: a file that failed transport has no send time, and
+    a caller must not substitute one. See `ems.flow_events` for what depends
+    on this being honest.
+    """
+    row = conn.execute(
+        "SELECT sent_at FROM outbound_file WHERE id = %s", (file_id,)
+    ).fetchone()
+    return None if row is None else row[0]
 
 
 def submit_items(conn: Connection, table: str, outbound_file_id: int) -> None:
