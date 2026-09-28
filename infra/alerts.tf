@@ -46,7 +46,7 @@ resource "google_monitoring_alert_policy" "job_failed" {
   combiner     = "OR"
 
   documentation {
-    content = <<-EOT
+    content   = <<-EOT
       A settlement Job exited non-zero.
 
       collect fails when a file could not be parsed, handled or acknowledged.
@@ -98,7 +98,7 @@ resource "google_monitoring_alert_policy" "job_failed" {
 # --- 2. a submission is critical -------------------------------------------
 
 resource "google_logging_metric" "gate_closure_critical" {
-  name   = "${local.prefix}-gate-closure-critical"
+  name = "${local.prefix}-gate-closure-critical"
   filter = join(" AND ", [
     "resource.type = \"cloud_run_job\"",
     "severity = \"ERROR\"",
@@ -125,7 +125,7 @@ resource "google_monitoring_alert_policy" "gate_closure" {
   combiner     = "OR"
 
   documentation {
-    content = <<-EOT
+    content   = <<-EOT
       A submission is within fifteen minutes of Gate Closure, or past it, and
       has not been acknowledged.
 
@@ -175,7 +175,7 @@ resource "google_monitoring_alert_policy" "collect_not_running" {
   enabled      = var.absence_alerts_enabled
 
   documentation {
-    content = <<-EOT
+    content   = <<-EOT
       collect has not completed for thirty minutes. It is scheduled every five.
 
       Nothing has failed -- that is the point. A Job that cannot start, a
@@ -227,7 +227,7 @@ resource "google_monitoring_alert_policy" "sweep_not_running" {
   enabled      = var.absence_alerts_enabled
 
   documentation {
-    content = <<-EOT
+    content   = <<-EOT
       sweep has not completed for ninety minutes. It is scheduled every
       fifteen.
 
@@ -276,7 +276,7 @@ resource "google_monitoring_alert_policy" "sweep_not_running" {
 # immediately rather than at the next audit.
 
 resource "google_logging_metric" "unencrypted" {
-  name   = "${local.prefix}-unencrypted"
+  name = "${local.prefix}-unencrypted"
   filter = join(" AND ", [
     "resource.type = \"cloud_run_job\"",
     "textPayload:\"UNENCRYPTED\"",
@@ -295,7 +295,7 @@ resource "google_monitoring_alert_policy" "unencrypted" {
   combiner     = "OR"
 
   documentation {
-    content = <<-EOT
+    content   = <<-EOT
       The gateway started without a keyring and would send files unencrypted.
 
       Every file exchanged with central systems must be signed and encrypted.

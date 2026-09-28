@@ -52,13 +52,46 @@ OPERATIONAL = "OPER"
 # acknowledged, and is silently never processed -- which looks identical to
 # working. Confirm the live versions before go-live.
 REPORT_FILE_TYPES = (
+    # ECVAA
     "E0131001", "E0131002",                 # Authorisation Report, sub-flow 1
     "E0132001", "E0132002",                 # Authorisation Report, sub-flow 2
     "E0141003", "E0141004",                 # Notification Report
     "E0221002",                             # Forward Contract Report
+    # SVAA
     "P0285001", "P0285002",                 # Delivered Volume Exception
     "P0288001", "P0288002", "P0288003",     # Secondary HH Consumption
     "P0333001", "P0333002",                 # Baselining Expected Volume Report
+    # CRA-I014 Registration Report. Sub-flows are separate file types, and the
+    # Flow Roles tab addresses them to 'BP' except sub-flow 3 which is 'PA'.
+    # Sub-flow 4 is 'SG' (BSC Service Agent) and is not ours.
+    #
+    # Every version present in the spec is registered rather than the latest
+    # only. These are reports: the handler records that one arrived and does
+    # not read its contents, so a version we never receive costs nothing,
+    # while one we did not register arrives, is acknowledged, and is counted
+    # as unhandled. That asymmetry does not apply to the flows above, where
+    # the handler acts on what it reads.
+    "R0141001",                             # sub-flow 1, BSC Party Registration
+    "R0142001",                             # sub-flow 2, Interconnector Administrator
+    "R0143001",                             # sub-flow 3, BSC Party Agent Registration
+    "R0145002", "R0145003",                 # sub-flow 5, BM Unit Registration
+    "R0145004", "R0145005",
+    "R0146001",                             # sub-flow 6, Trading Unit Registration
+    "R0147001",                             # sub-flow 7, Boundary Point Registration
+    "R0148001",                             # sub-flow 8, Interconnector Registration
+    "R0149001",                             # sub-flow 9, GSP Group Registration
+    "R014A001",                             # sub-flow 10, GSP Registration
+    "R014B001",                             # sub-flow 11, Inter-GSP-Group Connection
+    "R014C001",                             # sub-flow 12, Metering System Registration
+    # SAA-I014 Settlement Report, sub-flow 1. Addressed to 'BP'.
+    #
+    # Sub-flow 4 (S0144) is deliberately absent: the Flow Roles tab addresses
+    # it to 'VP', which is the Virtual Lead Party role. We are a Virtual
+    # Trading Party ('VT'), a different role under a different modification,
+    # so those files are not ours and registering them would mean accepting
+    # someone else's settlement report.
+    "S0141008", "S0141009", "S0141010",
+    "S0141011", "S0141012", "S0141013", "S0141014",
 )
 
 # E0071 has three versions differing only in optional records. The EAD record
@@ -87,6 +120,32 @@ class Config:
     ecvna: Identity
     environment: str
 
+    @property
+    def party(self) -> Identity:
+        """Us as a plain BSC Party.
+
+        IDD 2.2.1 field 7: a party receives a file under the role code for the
+        capacity it is receiving in, and 'in all other cases, the To Role Code
+        will be BP'. The registration and settlement reports are addressed
+        that way rather than to 'VT', because they concern us as a party, not
+        as a Virtual Trading Party.
+
+        Same Party Id as the VTP identity. A BSC Party holds one Party Id and
+        the role code distinguishes the capacity, so this needs no additional
+        configuration.
+        """
+        return Identity("BP", self.vtp.participant)
+
+    @property
+    def party_agent(self) -> Identity:
+        """Us as a BSC Party Agent.
+
+        CRA-I014 sub-flow 3 reports our registration details as a Party Agent
+        and is addressed to 'PA'. We are our own ECVN Agent, so it is ours and
+        it carries the same participant id as the ECVNA identity.
+        """
+        return Identity("PA", self.ecvna.participant)
+
     @classmethod
     def from_env(cls) -> "Config":
         """Read configuration, failing if it is incomplete.
@@ -107,9 +166,19 @@ class Config:
 
     @property
     def identities(self) -> dict[str, str]:
+        """Every role code we accept inbound files under.
+
+        The router refuses a file addressed to a role and participant we do
+        not hold, so a role missing here means those files are rejected as
+        somebody else's. Four rather than two: 'VT' and 'EN' for the flows we
+        send, 'BP' and 'PA' for the reports that reach us in our party and
+        party agent capacities.
+        """
         return {
             self.vtp.role: self.vtp.participant,
             self.ecvna.role: self.ecvna.participant,
+            self.party.role: self.party.participant,
+            self.party_agent.role: self.party_agent.participant,
         }
 
     @property

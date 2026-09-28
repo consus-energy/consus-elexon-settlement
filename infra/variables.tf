@@ -101,8 +101,8 @@ variable "connector_cidr" {
     Dedicated /28 for the Serverless VPC connector. Must not overlap
     subnet_cidr: GCP requires the connector to own its range exclusively.
   EOT
-  type    = string
-  default = "10.20.1.0/28"
+  type        = string
+  default     = "10.20.1.0/28"
 }
 
 
@@ -112,8 +112,8 @@ variable "alert_emails" {
     than a shared inbox: an alert nobody owns is an alert nobody reads, and
     the response to this one is a person performing the manual fallback.
   EOT
-  type    = list(string)
-  default = []
+  type        = list(string)
+  default     = []
 
   validation {
     condition     = length(var.alert_emails) > 0
@@ -128,8 +128,8 @@ variable "absence_alerts_enabled" {
     but an alert firing hourly for a known state is how people learn to ignore
     alerts. Turn back on when the schedulers resume.
   EOT
-  type    = bool
-  default = true
+  type        = bool
+  default     = true
 }
 
 variable "svaa_role_code" {
@@ -138,8 +138,8 @@ variable "svaa_role_code" {
     physical file specification in the SVA Data Catalogue, where SVAA appears
     as the From Role Code.
   EOT
-  type    = string
-  default = "G"
+  type        = string
+  default     = "G"
 }
 
 variable "svaa_participant_id" {
@@ -148,8 +148,8 @@ variable "svaa_participant_id" {
     "Id of SVAA" rather than a literal, and UKDC is confirmed for ECVAA only.
     Open question with Elexon.
   EOT
-  type    = string
-  default = "UKDC"
+  type        = string
+  default     = "UKDC"
 }
 
 variable "ems_publishers" {
@@ -161,8 +161,8 @@ variable "ems_publishers" {
     only access it has here. Publishing an intent is submitting a settlement
     position, so the list should be short and named.
   EOT
-  type    = list(string)
-  default = []
+  type        = list(string)
+  default     = []
 }
 
 variable "ems_bridge_test_subscription" {
@@ -170,6 +170,6 @@ variable "ems_bridge_test_subscription" {
     Create a pull subscription so published intents can be read back before
     the push subscription exists. Set false once ems.tf.hold is unheld.
   EOT
-  type    = bool
-  default = false
+  type        = bool
+  default     = false
 }

@@ -29,7 +29,7 @@ caused harm.
 
 ## Recording
 
-In the exception log, at the time rather than afterwards:
+In the exception log, at the time rather than afterwards. The log covers exceptions arising in operation; defects found during testing are recorded in the testing register instead, so that the two do not hold the same item twice.
 
 | Field | |
 |---|---|
