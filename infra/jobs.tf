@@ -68,7 +68,22 @@ locals {
     # because both halves of the channel are jobs: `collect` routes the E0521
     # that rejects a WMAN, and whatever sends one publishes the submission.
     { name = "CONSUS_EMS_FLOW_TOPIC", value = var.ems_flow_topic },
+    # PCIG 5.1 and the firewall tables in 9.1.4 and 9.2.1: standard FTP on
+    # port 21, passive, so every connection is outbound from our network.
+    # Confidentiality comes from gpg, which encrypts the payload before it
+    # reaches the transport (ADR-0011).
+    { name = "CONSUS_FTP_HOST", value = var.ftp_host },
+    { name = "CONSUS_FTP_PORT", value = tostring(var.ftp_port) },
+    { name = "CONSUS_FTP_TLS", value = var.ftp_tls ? "1" : "0" },
   ]
+
+  # One mounted password per identity. The container looks the file up by
+  # Participant ID, because that is what an FTP account belongs to and what
+  # the sender keys on when it picks a channel's transport.
+  ftp_password_files = {
+    for key, participant in local.ftp_accounts :
+    participant => "/secrets/ftp-${key}/password"
+  }
 
   # Jobs that run on a schedule. migrate is excluded deliberately: a schema
   # change is a deliberate act, and a migration applying itself on a timer
@@ -126,6 +141,23 @@ resource "google_cloud_run_v2_job" "gateway" {
       # migrate does not need these, but shares them rather than duplicating
       # the whole resource for one Job. The service account is the same
       # either way, so mounting them grants nothing it did not already have.
+      # One volume per FTP account. Cloud Run mounts a secret as a volume
+      # rather than a directory of several, so two accounts means two mounts.
+      dynamic "volumes" {
+        for_each = local.ftp_accounts
+        content {
+          name = "ftp-${volumes.key}"
+          secret {
+            secret = google_secret_manager_secret.ftp_password[volumes.key].secret_id
+            items {
+              version = "latest"
+              path    = "password"
+              mode    = 256 # 0400 octal
+            }
+          }
+        }
+      }
+
       volumes {
         name = "gpg-key"
         secret {
@@ -207,6 +239,25 @@ resource "google_cloud_run_v2_job" "gateway" {
           value = var.ecvna_participant_id
         }
 
+        # Where each identity's FTP password is mounted. Named by Participant
+        # ID so the transport can find the right one without a lookup table:
+        # the sender knows the channel, the channel knows the Participant ID.
+        dynamic "env" {
+          for_each = local.ftp_password_files
+          content {
+            name  = "CONSUS_FTP_PASSWORD_FILE_${upper(env.key)}"
+            value = env.value
+          }
+        }
+
+        dynamic "volume_mounts" {
+          for_each = local.ftp_accounts
+          content {
+            name       = "ftp-${volume_mounts.key}"
+            mount_path = "/secrets/ftp-${volume_mounts.key}"
+          }
+        }
+
         volume_mounts {
           name       = "gpg-key"
           mount_path = "/secrets/gpg-key"
@@ -238,6 +289,7 @@ resource "google_cloud_run_v2_job" "gateway" {
     # Terraform cannot infer that from the secret_id reference alone: it sees
     # a string, not a grant.
     google_secret_manager_secret_iam_member.gateway_gpg,
+    google_secret_manager_secret_iam_member.gateway_ftp,
   ]
 
   lifecycle {

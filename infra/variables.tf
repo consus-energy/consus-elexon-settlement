@@ -173,3 +173,31 @@ variable "ems_bridge_test_subscription" {
   type        = bool
   default     = false
 }
+
+variable "ftp_host" {
+  description = <<-EOT
+    BSC Central Services FTP host. PCIG 3.2.4 and 9.2.1:
+    ptsftp.bmreports.com for the Participant Test Service and qualification,
+    ftp.bmreports.com for live. Empty means no FTP is configured, and the
+    gateway falls back to local directories, which reach nobody.
+  EOT
+  type    = string
+  default = "ptsftp.bmreports.com"
+}
+
+variable "ftp_port" {
+  description = "PCIG 5.1: standard FTP, port 21."
+  type        = number
+  default     = 21
+}
+
+variable "ftp_tls" {
+  description = <<-EOT
+    Use FTPS. PCIG 5.1 specifies plain FTP on port 21, so this is false: a
+    default that cannot connect is not a safe default. Confidentiality comes
+    from gpg, which encrypts the payload before it reaches the transport, so
+    nothing readable crosses the wire either way. See ADR-0011.
+  EOT
+  type    = bool
+  default = false
+}

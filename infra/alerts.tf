@@ -27,6 +27,7 @@ resource "google_monitoring_notification_channel" "email" {
 
   display_name = "Settlement alerts: ${each.key}"
   type         = "email"
+  force_delete = true
 
   labels = {
     email_address = each.key
