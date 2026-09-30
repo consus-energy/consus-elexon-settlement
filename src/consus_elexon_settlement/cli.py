@@ -144,7 +144,7 @@ def _transport():
     Local is not a fallback that should ever be reached in an operational
     environment, which is why it logs.
     """
-    active_cipher = cipher()
+    active_cipher = build_cipher()
     host = os.environ.get("CONSUS_FTP_HOST")
 
     if not host:

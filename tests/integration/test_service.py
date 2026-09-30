@@ -344,7 +344,7 @@ def test_acceptance_moves_a_flow_but_not_the_intent(svc, conn):
         "UPDATE wman SET state = %s WHERE outbound_file_id = %s",
         (states.ACCEPTED, file_id),
     )
-    state = service.reconcile_intent(conn, file_id)
+    state = service.reconcile_intent(conn, file_id, now=IN_TIME)
 
     assert state == intents.ACTING
 
@@ -369,7 +369,7 @@ def test_all_acceptances_close_the_intent(svc, conn):
             f"UPDATE {table} SET state = %s WHERE outbound_file_id = %s",
             (states.ACCEPTED, files[flow]),
         )
-        state = service.reconcile_intent(conn, files[flow])
+        state = service.reconcile_intent(conn, files[flow], now=IN_TIME)
 
     assert state == intents.ACTED
 
@@ -394,7 +394,7 @@ def test_a_rejection_makes_the_intent_partial(svc, conn):
         "UPDATE notification SET state = %s WHERE outbound_file_id = %s",
         (states.REJECTED, file_id),
     )
-    state = service.reconcile_intent(conn, file_id)
+    state = service.reconcile_intent(conn, file_id, now=IN_TIME)
 
     assert state == intents.PARTIAL
 
@@ -405,7 +405,7 @@ def test_reconciling_a_file_with_no_intent_is_harmless(conn, channel):
     from ..conftest import built_file
 
     file_id = built_file(conn, channel)
-    assert service.reconcile_intent(conn, file_id) is None
+    assert service.reconcile_intent(conn, file_id, now=IN_TIME) is None
 
 
 def test_acceptance_after_the_deadline_does_not_reopen_a_missed_intent(

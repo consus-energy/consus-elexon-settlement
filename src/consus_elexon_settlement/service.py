@@ -151,7 +151,7 @@ class IntentService:
             )
             return Outcome(intent_id, intents.MISSED, {})
 
-        return self._send_flows(intent_id, intent)
+        return self._send_flows(intent_id, intent, now)
 
     def retry(self, intent_id: int, now: dt.datetime | None = None) -> Outcome:
         """Attempt the flows that have not succeeded.
@@ -194,9 +194,12 @@ class IntentService:
                 )
             return Outcome(intent_id, intents.MISSED, _flow_states_now(self, intent_id))
 
-        return self._send_flows(intent_id, intent)
+        return self._send_flows(intent_id, intent, now)
 
-    def _send_flows(self, intent_id: int, intent: intents.Intent) -> Outcome:
+    def _send_flows(
+        self, intent_id: int, intent: intents.Intent,
+        now: dt.datetime | None = None,
+    ) -> Outcome:
         """Send whatever is outstanding, then re-resolve.
 
         Each flow is attempted independently. One failing does not stop the
@@ -261,7 +264,12 @@ class IntentService:
                 log.warning("intent %s: %s not delivered: %s",
                             intent.key, flow, sent.error)
 
-        return self._resolve(intent_id, intent)
+        # `now` is threaded through rather than left to default. A caller that
+        # supplied a time meant it: falling back to the wall clock here would
+        # resolve against a different moment from the one the deadline was
+        # checked against, and every intent for a past settlement date would
+        # resolve as MISSED however it was sent.
+        return self._resolve(intent_id, intent, now)
 
     def _file_for_flow(self, intent_id: int, flow: str) -> int | None:
         """The file this flow already built, if any.
@@ -488,8 +496,18 @@ class IntentService:
 DELIVERED = intents.DELIVERED_FLOW
 
 
-def reconcile_intent(conn: Connection, outbound_file_id: int) -> str | None:
+def reconcile_intent(
+    conn: Connection,
+    outbound_file_id: int,
+    now: dt.datetime | None = None,
+) -> str | None:
     """Re-resolve the intent that owns a file, after feedback.
+
+    `now` is the moment to judge the deadline against, defaulting to the wall
+    clock. The inbound handlers pass nothing, which is right: feedback is
+    reconciled as it arrives. It is a parameter so the resolution can be
+    tested against a settlement date in the past without the clock deciding
+    the answer.
 
     Called from the inbound handlers when an acceptance or rejection arrives.
     Without this an intent never leaves ACTING, which would defeat the whole
@@ -529,7 +547,7 @@ def reconcile_intent(conn: Connection, outbound_file_id: int) -> str | None:
 
     flows = _flow_states(conn, intent_id)
     state = intents.resolve(
-        flows, deadlines.is_closed(settlement_date, settlement_period)
+        flows, deadlines.is_closed(settlement_date, settlement_period, now)
     )
     _set_state(conn, intent_id, state)
     return state

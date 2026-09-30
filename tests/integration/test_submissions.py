@@ -506,9 +506,14 @@ def test_the_timestamp_is_our_handover_and_the_message_says_so(
 
     (message,) = flow_publisher.messages
     assert message["occurred_at_basis"] == "sent"
-    assert message["occurred_at"] == db.sent_at(conn, sent.file_id).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    # astimezone before formatting. psycopg returns a timestamptz in the
+    # SESSION timezone, which is Europe/London on a developer machine, so
+    # formatting it straight with a Z suffix labels a BST time as UTC and the
+    # test fails for seven months of the year. The code under test converts;
+    # the assertion has to as well.
+    assert message["occurred_at"] == db.sent_at(conn, sent.file_id).astimezone(
+        dt.timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_a_wman_that_failed_transport_tells_the_ems_NOTHING(

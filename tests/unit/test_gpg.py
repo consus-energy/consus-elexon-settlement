@@ -16,6 +16,7 @@ import shutil
 import subprocess
 from pathlib import Path
 import tempfile
+from collections.abc import Iterator
 
 import pytest
 
@@ -46,7 +47,7 @@ def generate(home: Path, name: str) -> None:
 
 
 @pytest.fixture
-def keyring() -> Path:
+def keyring() -> Iterator[Path]:
     """One keyring holding both identities.
 
     Deliberately NOT tmp_path. GPG's agent socket lives inside the homedir and
