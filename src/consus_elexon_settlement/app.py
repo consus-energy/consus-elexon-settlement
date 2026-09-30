@@ -239,7 +239,7 @@ def build(
     config: Config,
     dsn: str,
     archive: Archive,
-    transport: Transport,
+    transport,
     store_key=None,
     flow_publisher=None,
 ) -> Gateway:
@@ -249,6 +249,18 @@ def build(
     test supplies LocalArchive and LocalTransport without this function
     growing a branch on environment. The choice of implementation belongs to
     whoever starts the process.
+
+    `transport` is one of three things, because PCIG 5.1 gives us one FTP
+    account per Participant ID and we hold two identities:
+
+        a Transport                            one account, for everything
+        a callable participant_id -> Transport  that identity's account
+        a sequence of Transports                every account, for collecting
+
+    A callable is what a deployment talking to Elexon supplies; the sender
+    asks it for the channel's sending Participant Id, and the receiver drains
+    every account the config names. A single Transport still works and is what
+    tests and local runs use.
 
     `dsn` rather than a connection: handlers and the sender each open one per
     operation. A connection held open across a long-running poller is a
@@ -290,12 +302,26 @@ def build(
 
     sender = Sender(connect=connect, archive=archive, transport=transport)
 
+    # The receiver needs every account, not one: a rejection sitting unread in
+    # the other identity's outbox looks exactly like a quiet day. The
+    # identities come from config rather than from the database, because this
+    # runs at startup and an account we hold exists whether or not a channel
+    # row has been seeded yet. dict.fromkeys rather than a set: order is
+    # stable, which keeps logs and test output readable.
+    if callable(transport):
+        participants = dict.fromkeys(
+            [config.vtp.participant, config.ecvna.participant]
+        )
+        inbound_transports = [transport(p) for p in participants]
+    else:
+        inbound_transports = transport
+
     return Gateway(
         receiver=Receiver(
             connect=connect,
             archive=archive,
             router=build_router(config, handlers),
-            transport=transport,
+            transport=inbound_transports,
             response_name=response_filename,
         ),
         sender=sender,

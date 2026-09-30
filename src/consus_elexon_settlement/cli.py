@@ -100,43 +100,80 @@ def _archive() -> Archive:
     return LocalArchive(root=Path(root))
 
 
-def _transport() -> Transport:
-    """Transport, wrapped in encryption.
+def _ftp_for(participant_id: str) -> FtpTransport:
+    """The FTP account belonging to one Participant ID.
 
-    FTP when a host is configured, local directories otherwise. Local is for
-    development and for the period before Elexon supply the endpoint; it is
-    not a fallback that should ever be reached in an operational environment,
-    which is why it logs.
+    PCIG 5.1: an account is issued per registered Participant ID and the
+    Participant ID is the username, so each of our identities has its own
+    credentials and its own directory tree beneath the server root:
+
+        /<participant>/temp     stage here
+        /<participant>/inbox    rename here; Elexon collect from here
+        /<participant>/outbox   Elexon write here; we collect and delete
+
+    The password is read from a file per identity, so the two never share a
+    secret and a mistake in one cannot authenticate as the other.
     """
+    host = _require("CONSUS_FTP_HOST")
+    suffix = participant_id.upper()
+    root = f"/{participant_id}"
+
+    return FtpTransport(
+        host=host,
+        port=int(os.environ.get("CONSUS_FTP_PORT", "21")),
+        username=participant_id,
+        password=read_secret_file(f"CONSUS_FTP_PASSWORD_FILE_{suffix}"),
+        staging_dir=f"{root}/temp",
+        outbound_dir=f"{root}/inbox",
+        inbound_dir=f"{root}/outbox",
+        # PCIG 5.1 and the firewall tables in 9.1.4 and 9.2.1: standard FTP on
+        # port 21, passive. The payload is already gpg-encrypted before it
+        # reaches here (ADR-0011), so nothing readable crosses the wire.
+        tls=os.environ.get("CONSUS_FTP_TLS", "0") != "0",
+        passive=os.environ.get("CONSUS_FTP_PASSIVE", "1") != "0",
+    )
+
+
+def _transport():
+    """Transport selection, wrapped in encryption.
+
+    Returns a callable from Participant Id to transport when FTP is configured,
+    because each identity has its own account. Returns a single transport
+    otherwise: local directories are for development and for the period
+    before Elexon supply the endpoint, and one directory pair is enough there.
+    Local is not a fallback that should ever be reached in an operational
+    environment, which is why it logs.
+    """
+    active_cipher = cipher()
     host = os.environ.get("CONSUS_FTP_HOST")
-    inner: Transport
-    if host:
-        inner = FtpTransport(
-            host=host,
-            port=int(os.environ.get("CONSUS_FTP_PORT", "21")),
-            username=_require("CONSUS_FTP_USER"),
-            password=read_secret_file("CONSUS_FTP_PASSWORD_FILE"),
-            outbound_dir=_require("CONSUS_FTP_OUTBOUND_DIR"),
-            inbound_dir=_require("CONSUS_FTP_INBOUND_DIR"),
-            # Defaults to TLS. Whether Elexon use FTPS or plain FTP is an
-            # open question; defaulting to the insecure option would be the
-            # wrong way round.
-            tls=os.environ.get("CONSUS_FTP_TLS", "1") != "0",
-            passive=os.environ.get("CONSUS_FTP_PASSIVE", "1") != "0",
-        )
-    else:
+
+    if not host:
         log.warning(
             "CONSUS_FTP_HOST is not set: using local directories. Nothing "
             "will reach Elexon."
         )
-        inner = LocalTransport(
+        inner: Transport = LocalTransport(
             outbox=Path(_require("CONSUS_OUTBOX")),
             inbox=Path(_require("CONSUS_INBOX")),
         )
+        log.info("transport=%s cipher=%s",
+                 type(inner).__name__, type(active_cipher).__name__)
+        return EncryptedTransport(inner=inner, cipher=active_cipher)
 
-    cipher = cipher()
-    log.info("transport=%s cipher=%s", type(inner).__name__, type(cipher).__name__)
-    return EncryptedTransport(inner=inner, cipher=cipher)
+    # Built once per identity rather than per send: FtpTransport opens a
+    # connection per operation, so the object itself is cheap to keep.
+    accounts: dict[str, Transport] = {}
+
+    def for_participant(participant_id: str) -> Transport:
+        if participant_id not in accounts:
+            accounts[participant_id] = EncryptedTransport(
+                inner=_ftp_for(participant_id), cipher=active_cipher
+            )
+        return accounts[participant_id]
+
+    log.info("transport=FtpTransport (per identity) cipher=%s",
+             type(active_cipher).__name__)
+    return for_participant
 
 
 def _key_store():

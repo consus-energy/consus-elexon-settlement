@@ -22,13 +22,21 @@ the identity by passing the right channel; nothing here infers it, because an
 inference that is wrong corrupts both sequences silently. See ADR-0004.
 
 Transport is a protocol, not a dependency. Encryption sits behind the same
-interface, so whether XSec is in the path is invisible from here.
+interface, so the cipher in the path is invisible from here.
+
+ONE FTP ACCOUNT PER IDENTITY. PCIG 5.1 gives a Participant one FTP account per
+registered Participant ID, and the Participant ID is the username. Our two
+identities are therefore two accounts with two directory trees, so transport
+is selected per channel, not held once. Sending an ECVN through the VTP
+account would place it in the wrong party's inbox: a file Elexon would either
+reject or attribute to the wrong participant.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from typing import Callable
 
 from .. import db, states
 from ..archive import Archive, object_key
@@ -66,11 +74,27 @@ class Sender:
         self,
         connect,
         archive: Archive,
-        transport: Transport,
+        transport: Transport | Callable[[str], Transport],
     ) -> None:
         self._connect = connect
         self._archive = archive
         self._transport = transport
+
+    def _transport_for(self, channel: db.Channel) -> Transport:
+        """The transport for one channel's identity.
+
+        Keyed on the sending Participant Id, because that is what an account
+        belongs to (PCIG 5.1): the same id sends under more than one role
+        code, and all of it goes through the one account.
+
+        A plain Transport is accepted and used for every channel, which keeps
+        local and in-memory transports simple in tests and development. An
+        environment talking to Elexon supplies a callable, since each identity
+        has its own credentials.
+        """
+        if callable(self._transport):
+            return self._transport(channel.from_participant_id)
+        return self._transport
 
     def send(
         self,
@@ -134,13 +158,12 @@ class Sender:
             )
 
         # Sending happens outside the reserve/build transaction. If transport
-        # hangs -- and with XSec in the path it can, since encryption is an
-        # asynchronous file handover -- the file is already archived and
-        # recoverable. Holding the transaction open across a network call
-        # would block the sequence counter for every other file on the
-        # channel.
-        return self._deliver(reserved.id, reserved.filename,
-                             reserved.sequence_number, payload, uri)
+        # hangs, the file is already archived and recoverable. Holding the
+        # transaction open across a network call would block the sequence
+        # counter for every other file on the channel.
+        return self._deliver(self._transport_for(channel), reserved.id,
+                             reserved.filename, reserved.sequence_number,
+                             payload, uri)
 
     def retry(self, file_id: int) -> Sent:
         """Re-send an already-built file.
@@ -151,28 +174,37 @@ class Sender:
         """
         with self._connect() as conn:
             row = conn.execute(
-                """SELECT filename, sequence_number, gcs_uri, state
-                     FROM outbound_file WHERE id = %s""",
+                """SELECT f.filename, f.sequence_number, f.gcs_uri, f.state,
+                          c.id, c.from_role_code, c.from_participant_id,
+                          c.to_role_code, c.to_participant_id, c.test_flag
+                     FROM outbound_file f
+                     JOIN channel c ON c.id = f.channel_id
+                    WHERE f.id = %s""",
                 (file_id,),
             ).fetchone()
 
         if row is None:
             raise SendError(f"no outbound file {file_id}")
-        filename, sequence_number, uri, state = row
+        filename, sequence_number, uri, state = row[:4]
+        # The retry must go out through the same identity's account as the
+        # original: the file's header names that identity, and the account it
+        # arrives in has to agree.
+        channel = db.Channel(*row[4:])
         if state not in (states.BUILT, states.SEND_FAILED, states.SENT):
             raise SendError(f"file {file_id} is {state} and is not retryable")
         if uri is None:
             raise SendError(f"file {file_id} has no archived bytes")
 
         payload = self._archive.get(uri)
-        return self._deliver(file_id, filename, sequence_number, payload, uri)
+        return self._deliver(self._transport_for(channel), file_id, filename,
+                             sequence_number, payload, uri)
 
     def _deliver(
-        self, file_id: int, filename: str, sequence_number: int,
-        payload: bytes, uri: str,
+        self, transport: Transport, file_id: int, filename: str,
+        sequence_number: int, payload: bytes, uri: str,
     ) -> Sent:
         try:
-            self._transport.send(filename, payload)
+            transport.send(filename, payload)
         except Exception as exc:  # noqa: BLE001 - recorded, then reported
             with self._connect() as conn:
                 db.record_send_failed(conn, file_id, str(exc))

@@ -24,6 +24,8 @@ what we would have said. Elexon will resend; we will have the record.
 from __future__ import annotations
 
 import datetime as dt
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .. import db
@@ -31,6 +33,8 @@ from ..archive import Archive, AlreadyArchived, object_key
 from ..idd.file import FileError
 from ..outbound.transport import Transport
 from .router import Received, Router
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -49,35 +53,67 @@ class Collected:
 
 
 class Receiver:
-    """Archives, records, routes and acknowledges inbound files."""
+    """Archives, records, routes and acknowledges inbound files.
+
+    ONE ACCOUNT PER IDENTITY. PCIG 5.1 issues an FTP account per registered
+    Participant ID, so files addressed to us as the VTP and to us as the ECVN
+    Agent arrive in two different outboxes. Both must be drained on every run:
+    collecting from one only would leave rejections sitting unread in the
+    other with nothing to indicate it, which is the silent-inbound failure
+    mode. Each transport is collected in turn and a failure on one does not
+    stop the next.
+    """
 
     def __init__(
         self,
         connect,
         archive: Archive,
         router: Router,
-        transport: Transport,
+        transport: Transport | Sequence[Transport],
         response_name,
     ) -> None:
         self._connect = connect
         self._archive = archive
         self._router = router
-        self._transport = transport
+        # A single transport is accepted and treated as one account, which
+        # keeps local and in-memory transports simple in tests.
+        self._transports: tuple[Transport, ...] = (
+            tuple(transport)
+            if isinstance(transport, (list, tuple))
+            else (transport,)
+        )
         self._response_name = response_name
 
     def collect(self) -> list[Collected]:
-        """Process every waiting file.
+        """Process every waiting file, from every account.
 
         One failure does not stop the rest. A malformed file must not prevent
         the next one being read, because that next one may be a rejection
-        needing action before Gate Closure.
+        needing action before Gate Closure. The same applies across accounts:
+        an account that cannot be reached must not prevent the others being
+        drained.
         """
-        return [
-            self.receive_one(filename, payload)
-            for filename, payload in self._transport.collect()
-        ]
+        collected: list[Collected] = []
 
-    def receive_one(self, filename: str, payload: bytes) -> Collected:
+        for transport in self._transports:
+            try:
+                waiting = transport.collect()
+            except Exception as exc:  # noqa: BLE001 - logged, others continue
+                log.error("could not collect from %s: %s",
+                          type(transport).__name__, exc)
+                continue
+
+            for filename, payload in waiting:
+                collected.append(self.receive_one(filename, payload, transport))
+
+        return collected
+
+    def receive_one(
+        self,
+        filename: str,
+        payload: bytes,
+        transport: Transport | None = None,
+    ) -> Collected:
         received_at = dt.datetime.now(dt.timezone.utc)
 
         # 1 and 2: evidence first, interpretation second.
@@ -131,8 +167,14 @@ class Receiver:
             )
 
         # 5 and 6: reply, then note that we did.
+        #
+        # The response goes back through the account the file arrived in. The
+        # ADT header reverses from and to (IDD 2.2.7), so the identity
+        # replying is the one the file was addressed to, and that is the
+        # account holding its directories.
+        reply_via = transport or self._transports[0]
         try:
-            self._transport.send(self._response_name(filename), received.response)
+            reply_via.send(self._response_name(filename), received.response)
         except Exception as exc:  # noqa: BLE001
             return Collected(filename, received, archived=True,
                              acknowledged=False, error=f"ack failed: {exc}")

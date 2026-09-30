@@ -6,22 +6,36 @@ receipt, which arrives later as an ADT. Inbound offers push or pull; under
 pull, deleting the file from the source directory is how we confirm we have
 it.
 
-Two things about this module are deliberately conservative.
+PCIG 5.1 settles the details the IDD defers. Login places us in a directory
+named for the Participant ID, holding three subdirectories:
 
-UPLOAD IS ATOMIC. A file is uploaded under a temporary name and renamed into
-place. Without that, a poller on the far end can collect a half-written file,
-reject it as malformed, and consume our sequence number for a file we sent
-correctly. The rename is the only operation the FTP protocol offers that is
-atomic from the reader's point of view.
+    /<participant>/temp     files land here first
+    /<participant>/inbox    renamed here once complete; they collect from here
+    /<participant>/outbox   they write here; we collect and delete
+
+UPLOAD IS STORE-THEN-RENAME ACROSS DIRECTORIES. PCIG 5.1.2 requires a file to
+be stored in temp and renamed into inbox, and states the requirement rather
+than recommending it. The rename is what makes the arrival atomic: without it
+their collector can take a half-written file, reject it as malformed, and
+consume the sequence number for a file we sent correctly. A temporary *name*
+within inbox is not equivalent, because the partial file is already in the
+directory they poll.
 
 DELETION FOLLOWS THE READ, NOT THE OTHER WAY ROUND. A file is only removed
-from the inbound directory once its bytes are held. Deleting first would lose
-a rejection we never saw, and rejections are the messages that matter.
+from outbox once its bytes are held. Deleting first would lose a rejection we
+never saw, and rejections are the messages that matter. PCIG 5.1.1 also makes
+the delete our confirmation of receipt, so it must not happen early.
 
-FTPS or plain FTP is not yet confirmed -- it is a question outstanding with
-Elexon. `tls` therefore defaults to True: defaulting to the insecure option
-would be the wrong way round, and a connection that fails loudly is better
-than one that silently sends settlement data in the clear.
+PLAIN FTP ON PORT 21. PCIG 5.1 and the firewall tables in 9.1.4 and 9.2.1
+specify standard FTP, and passive, which keeps every connection outbound from
+our network. `tls` is retained as an option but defaults to False: the server
+does not offer it, and a default that cannot connect is not a safe default.
+Confidentiality comes from gpg, which encrypts the payload before it reaches
+this module (ADR-0011), so nothing readable crosses the wire regardless.
+
+PER-FILE OPERATIONS. PCIG 5.1.1 asks for individual retrieves and deletes
+rather than batch commands such as mget, since batching disrupts their
+processing.
 """
 
 from __future__ import annotations
@@ -35,9 +49,11 @@ from .transport import TransportError
 
 log = logging.getLogger(__name__)
 
-# Uploaded files carry this suffix until complete, then are renamed into
-# place. Chosen to be obviously not a settlement filename: IDD 2.2.5 names are
-# 14 characters, so anything longer cannot be mistaken for a real one.
+# Anything in the collect directory carrying this suffix is skipped. Files we
+# send no longer use it -- staging is by directory now, per PCIG 5.1.2 -- but
+# a partial left behind by a failed rename must never be collected, and the
+# suffix is obviously not a settlement filename: IDD 2.2.5 names are 14
+# characters, so anything longer cannot be mistaken for one.
 PARTIAL_SUFFIX = ".partial"
 
 
@@ -54,10 +70,12 @@ class FtpTransport:
     host: str
     username: str
     password: str
+    # PCIG 5.1.2: files are stored here first, then renamed into outbound_dir.
+    staging_dir: str
     outbound_dir: str
     inbound_dir: str
     port: int = 21
-    tls: bool = True
+    tls: bool = False
     passive: bool = True
     timeout_seconds: float = 60.0
     # Files collected but not deleted, for the pull method where the far end
@@ -81,25 +99,24 @@ class FtpTransport:
                 f"IDD 2.2.5 allows 14"
             )
 
-        temporary = f"{filename}{PARTIAL_SUFFIX}"
+        staged = f"{self.staging_dir.rstrip('/')}/{filename}"
+        destination = f"{self.outbound_dir.rstrip('/')}/{filename}"
 
         with self._connect() as ftp:
-            ftp.cwd(self.outbound_dir)
-
             try:
-                ftp.storbinary(f"STOR {temporary}", io.BytesIO(payload))
+                ftp.storbinary(f"STOR {staged}", io.BytesIO(payload))
             except ftplib.all_errors as exc:
                 raise TransportError(f"uploading {filename}: {exc}") from exc
 
             try:
-                ftp.rename(temporary, filename)
+                ftp.rename(staged, destination)
             except ftplib.all_errors as exc:
-                # The partial file is left behind deliberately. Removing it
-                # would hide evidence of a failure that needs looking at, and
-                # its suffix means nothing will collect it.
+                # The staged file is left behind deliberately. Removing it
+                # would hide a failure worth looking at, and nothing collects
+                # from the staging directory.
                 raise TransportError(
-                    f"renaming {temporary} to {filename}: {exc}. The partial "
-                    f"file remains in {self.outbound_dir} for investigation."
+                    f"renaming {staged} to {destination}: {exc}. The staged "
+                    f"file remains in {self.staging_dir} for investigation."
                 ) from exc
 
         self._sent.append(filename)

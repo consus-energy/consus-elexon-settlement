@@ -177,24 +177,49 @@ def create_app() -> Flask:
     return flask_app
 
 
-def _transport() -> Transport:
-    """FTP, encrypted. No local fallback.
+def _transport():
+    """FTP, encrypted, one account per identity. No local fallback.
 
     cli._transport falls back to local directories when no host is set, which
     is right for development. Here it is not: an endpoint that accepts an
     intent and writes it to a directory nobody reads would report success and
     submit nothing.
+
+    Returns a callable from Participant Id to transport. PCIG 5.1 issues an
+    FTP account per registered Participant ID, so an intent that becomes an
+    ECVN and one that becomes a WMAN leave through different accounts, and the
+    sender chooses by channel.
     """
-    inner = FtpTransport(
-        host=_require("CONSUS_FTP_HOST"),
-        port=int(os.environ.get("CONSUS_FTP_PORT", "21")),
-        username=_require("CONSUS_FTP_USER"),
-        password=open(_require("CONSUS_FTP_PASSWORD_FILE")).read().strip(),
-        outbound_dir=_require("CONSUS_FTP_OUTBOUND_DIR"),
-        inbound_dir=_require("CONSUS_FTP_INBOUND_DIR"),
-        tls=os.environ.get("CONSUS_FTP_TLS", "1") != "0",
-    )
-    return EncryptedTransport(inner=inner, cipher=build_cipher())
+    host = _require("CONSUS_FTP_HOST")
+    port = int(os.environ.get("CONSUS_FTP_PORT", "21"))
+    cipher = build_cipher()
+    accounts: dict[str, Transport] = {}
+
+    def for_participant(participant_id: str) -> Transport:
+        if participant_id not in accounts:
+            root = f"/{participant_id}"
+            inner = FtpTransport(
+                host=host,
+                port=port,
+                username=participant_id,
+                password=open(
+                    _require(f"CONSUS_FTP_PASSWORD_FILE_{participant_id.upper()}")
+                ).read().strip(),
+                # PCIG 5.1.2: store in temp, rename into inbox. They collect
+                # from inbox and write to outbox.
+                staging_dir=f"{root}/temp",
+                outbound_dir=f"{root}/inbox",
+                inbound_dir=f"{root}/outbox",
+                # PCIG 5.1: standard FTP on port 21. The payload is already
+                # gpg-encrypted before it reaches here (ADR-0011).
+                tls=os.environ.get("CONSUS_FTP_TLS", "0") != "0",
+            )
+            accounts[participant_id] = EncryptedTransport(
+                inner=inner, cipher=cipher
+            )
+        return accounts[participant_id]
+
+    return for_participant
 
 
 # gunicorn imports this.
